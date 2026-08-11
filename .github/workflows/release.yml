@@ -102,16 +102,23 @@ jobs:
     needs: [guard, build]
     if: needs.guard.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    # OIDC "trusted publishing" — no NPM_TOKEN, works with account 2FA.
+    # Requires: (1) the package already exists on npm, and (2) a trusted
+    # publisher configured on the package (repo guvense/noworries, workflow
+    # release.yml). Do the very first publish manually (see docs/releasing.md).
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+      - name: Ensure npm supports OIDC (>= 11.5.1)
+        run: npm install -g npm@latest
       - name: Sync version + publish
         working-directory: dist/npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           npm version "${{ needs.guard.outputs.version }}" --no-git-tag-version --allow-same-version

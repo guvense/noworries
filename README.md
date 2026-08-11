@@ -103,8 +103,8 @@ noworries install-command
 <summary><b>npm</b></summary>
 
 ```bash
-npm install -g noworries       # postinstall downloads the prebuilt binary
-noworries install-command
+npm install -g @guvenseckin4/noworries   # postinstall downloads the prebuilt binary
+noworries install-command                # the command is still `noworries`
 ```
 </details>
 

@@ -1,5 +1,5 @@
 {
-  "name": "noworries",
+  "name": "@guvenseckin4/noworries",
   "version": "0.1.0",
   "description": "Ephemeral infra harness that lets an AI verify the changes it just made (Postgres/Kafka/Redis + the /noworries Claude Code command).",
   "bin": {

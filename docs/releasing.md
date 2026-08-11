@@ -28,8 +28,34 @@ the **Actions** tab (`workflow_dispatch`).
 
 | Secret               | What |
 | -------------------- | ---- |
-| `NPM_TOKEN`          | npm **Automation** (or granular, read/write) token. |
 | `HOMEBREW_TAP_TOKEN` | A PAT with **Contents: read and write** on the tap repo. |
+
+npm publishing uses **OIDC trusted publishing** — no `NPM_TOKEN` needed (and it
+works with account 2FA).
+
+### npm: first publish + trusted publishing
+
+npm removed classic tokens, and granular tokens are awkward with 2FA, so this
+repo publishes via **OIDC trusted publishing** (tokenless). One-time setup:
+
+1. **First publish manually** (creates the package — trusted publishing can only
+   be configured on a package that exists). Make sure the GitHub Release for that
+   version exists first (the npm package's postinstall downloads the binary from
+   it), then from your machine:
+   ```bash
+   cd dist/npm
+   npm version <version> --no-git-tag-version --allow-same-version
+   npm publish --access public      # prompts for your 2FA one-time password
+   ```
+2. On npmjs.com → the `@guvenseckin4/noworries` package → **Settings → Trusted
+   Publisher** → add: organization/user `guvense`, repository `noworries`,
+   workflow filename `release.yml`.
+
+   (The package is scoped `@guvenseckin4/noworries` because the plain name
+   `noworries` is rejected as too similar to an existing package. The installed
+   command is still `noworries`.)
+3. From then on, the `npm` job publishes automatically via OIDC on every release
+   — no token, no OTP.
 
 ### The Homebrew tap repo
 
