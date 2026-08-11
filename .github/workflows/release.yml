@@ -57,9 +57,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Intel macOS is cross-compiled on the arm64 runner (no C deps, so this
+          # just works) — the old Intel `macos-13` runner image was retired.
+          - os: macos-15
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu

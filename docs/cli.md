@@ -1,0 +1,55 @@
+# CLI reference
+
+```
+noworries [OPTIONS] [COMMAND]
+```
+
+## Commands
+
+| Command                          | Description |
+| -------------------------------- | ----------- |
+| `noworries`                      | Run the harness: detect services, (confirm), bring infra up, start the app, run checks, tear down. |
+| `noworries init`                 | Scaffold a starter `noworries.yml`. |
+| `noworries changed`              | List files changed vs `HEAD` (modified + staged + untracked). Used by `/noworries` to scope checks. |
+| `noworries changed --all`        | List **all** tracked files (the `force` / regression scope). `--force` is an alias for `--all`. |
+| `noworries install-command`      | Install the `/noworries` Claude Code slash command into `~/.claude/commands`. |
+| `noworries install-command --project` | Install it into `./.claude/commands` (this project only). |
+
+## Options (for a run)
+
+| Flag              | Default   | Description |
+| ----------------- | --------- | ----------- |
+| `-y`, `--yes`     | off       | Skip the confirmation prompt (assume yes). |
+| `--tags a,b`      | all       | Only run checks tagged with any of these. |
+| `--keep-alive`    | off       | Leave containers running after the run (for debugging). |
+| `--timeout N`     | `180`     | Hard cap on the whole run, in seconds. |
+| `--json`          | off       | Also print the results summary as JSON on stdout. |
+| `--dir <path>`    | `.`       | Project directory. |
+
+## Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0`  | READY — all selected checks passed. |
+| `1`  | NOT READY, or an error (bad spec, Docker unavailable, app failed to start). |
+| `2`  | Not confirmed (ran without `--yes` and declined the prompt). |
+
+## Examples
+
+```bash
+noworries --yes                     # non-interactive run of all checks
+noworries --yes --tags orders       # just the "orders" checks
+noworries --keep-alive --tags smoke # leave infra up to poke at it
+noworries changed --json            # {"...":["src/Foo.java", ...]} for tooling
+NOWORRIES_REPO=me/fork noworries ... # (install.sh honors this; the binary reads noworries.yml)
+```
+
+## Generated files (`.noworries/`)
+
+| File                  | What it is |
+| --------------------- | ---------- |
+| `compose.test.yml`    | The generated Docker Compose file for the run. |
+| `app.log`             | The app process's stdout/stderr. |
+| `results.json`        | Machine-readable check results. |
+
+`.noworries/` is safe to add to `.gitignore`.
