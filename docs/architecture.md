@@ -5,18 +5,29 @@ new framework or service never touches the core.
 
 ```
 src/
-  main.rs        CLI (clap) + run orchestration + teardown safety net
-  spec.rs        noworries.yml types + parse/validate
-  framework.rs   Framework trait + Spring Boot adapter      ← add frameworks here
-  services.rs    ServiceProvider trait + Postgres/Kafka/Redis ← add services here
-  compose.rs     compose.test.yml generation
-  lifecycle.rs   up / health / port-resolve / teardown (docker compose)
-  app.rs         start the app subprocess, wire env, wait for health
-  runner.rs      HTTP + DB + Kafka + Redis check execution
-  docker.rs      docker CLI helpers
-  git.rs         changed-files detection for /noworries
-  report.rs      output + results.json
+  main.rs            CLI (clap) + run orchestration + teardown safety net
+  spec.rs            noworries.yml types + parse/validate
+  framework/
+    mod.rs           Framework trait + registry + shared helpers (interface only)
+    spring_boot.rs   Spring Boot adapter          ← add a framework: new file here
+  services/
+    mod.rs           ServiceProvider trait + registry + shared types (interface only)
+    postgres.rs      Postgres provider            ← add a service: new file here
+    kafka.rs         Kafka provider
+    redis.rs         Redis provider
+  compose.rs         compose.test.yml generation
+  lifecycle.rs       up / health / port-resolve / teardown (docker compose)
+  app.rs             start the app subprocess, wire env, wait for health
+  runner.rs          HTTP + DB + Kafka + Redis check execution
+  docker.rs          docker CLI helpers
+  git.rs             changed-files detection for /noworries
+  report.rs          output + results.json
 ```
+
+The `framework/` and `services/` modules keep the **interface** (`mod.rs`) apart
+from the **implementations** (one file each), so the two extension points grow
+without the core changing — new adapters are added, never edited into an
+existing file (open/closed).
 
 ## The two traits
 
@@ -36,10 +47,11 @@ pub trait Framework {
 }
 ```
 
-**Adding Go** (illustrative): implement `Framework` for a `Go` struct that
-`detect`s `go.mod`, returns `go run .` as the start command, and maps endpoints
-to `DATABASE_URL` / `KAFKA_BROKERS` / `REDIS_URL`. Then add one line to
-`framework::registry()`. Nothing else changes.
+**Adding Go** (illustrative): create `src/framework/go.rs`, implement `Framework`
+for a `Go` struct that `detect`s `go.mod`, returns `go run .` as the start
+command, and maps endpoints to `DATABASE_URL` / `KAFKA_BROKERS` / `REDIS_URL`.
+Then declare `pub mod go;` and add one line to `framework::registry()` in
+`framework/mod.rs`. Nothing else changes.
 
 ### `ServiceProvider` (`src/services.rs`)
 
@@ -55,7 +67,8 @@ pub trait ServiceProvider {
 }
 ```
 
-**Adding a service** is a new impl plus one arm in `services::provider_for()`.
+**Adding a service** is a new file `src/services/<name>.rs` with the impl, plus
+`pub mod <name>;` and one arm in `services::provider_for()` in `services/mod.rs`.
 Services that must know their host port up front (like Kafka's advertised
 listener) return `true` from `needs_fixed_host_port()`, and compose generation
 reserves a free port for them instead of letting Docker randomize it.
@@ -74,10 +87,25 @@ reserves a free port for them instead of letting Docker randomize it.
 
 ## Testing
 
-- `cargo test --lib` — unit tests (subset matching, image expansion, …).
-- `tests/lifecycle_it.rs` — real-Docker container lifecycle (uses a local image).
+Client-library integration bugs (a wrong API call against Kafka, Elasticsearch,
+Postgres, …) only surface at runtime against a **real** service — compile checks
+and pure-logic unit tests can't catch them. So every external dependency has an
+integration test that actually talks to it, and CI runs them against real
+services on every push.
+
+- `cargo test --lib` — unit tests (subset matching, interpolation, base64, JSON
+  path, auth resolution, image expansion, …).
+- `tests/lifecycle_it.rs` — real-Docker container lifecycle.
 - `tests/runner_it.rs` — app start + HTTP/DB runner against a real Postgres.
 - `tests/redis_it.rs` — HTTP + DB + Redis against real Postgres + Redis.
+- `tests/auth_it.rs` — the login → token → protected-request flow over real HTTP.
+- `tests/kafka_it.rs` — **produce + consume against a real broker** (this is the
+  path where the consumer "offset storage" bug lived).
+- `tests/elastic_it.rs` — template + insert/update/delete + doc/search against a
+  real Elasticsearch.
 
-Integration tests self-skip unless the relevant `NOWORRIES_IT_*` env vars are
-set (they need real services / images available).
+Integration tests self-skip unless their `NOWORRIES_IT_*` env vars are set.
+**CI** (`.github/workflows/ci.yml`) brings up real Postgres / Redis / Kafka /
+Elasticsearch via `ci/docker-compose.yml`, sets those vars, and runs the suite
+plus `clippy -D warnings` on every push and PR — so a regression in how the CLI
+uses a client library fails the build.

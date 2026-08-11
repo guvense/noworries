@@ -38,7 +38,14 @@ everything down. Exit code `0` = READY, `1` = NOT READY / error.
    - anything written to the **database**,
    - a **Kafka** consumer added (triggered by a message on a topic) or a
      producer added (emits to a topic),
-   - anything **cached to Redis**.
+   - anything **cached to Redis**,
+   - anything **indexed to / searched in Elasticsearch** (new index, mapping,
+     documents written or queried).
+
+   **Auth.** If the endpoints require authentication, add a top-level `auth`
+   block: `login` (call the login endpoint, `token_from` the token, auto-inject
+   `Authorization`), `bearer`, `basic`, or `api_key`. Put secrets in env vars and
+   reference them as `${VAR}` (never hardcode tokens in `noworries.yml`).
 
 2. **Write / update `noworries.yml`.** Declare the `services` the change needs
    and add `checks` that capture the behaviour:
@@ -48,6 +55,20 @@ everything down. Exit code `0` = READY, `1` = NOT READY / error.
      `db`/`redis` assertion for the effect it should have.
    - Kafka producer feature: `kafka.expect_message` on the output topic.
    - Redis cache feature: `redis.key` + `expect_exists` / `expect_value_contains`.
+   - Elasticsearch feature: `elastic` with an `index`, an optional index
+     `template`, noworries-run `operations` (insert/update/delete for
+     setup/trigger), and verification (`doc_id` + `expect_source_contains`, or a
+     `query` + `expect_hits`).
+
+   **Elasticsearch templates (7 vs 8).** When the feature relies on a specific
+   index mapping, generate the index template from the code (entity mappings /
+   annotations) in the format for the declared ES major version — ES 8 and ES
+   7.8+ use `_index_template` (the default); very old ES 7 uses the legacy
+   `_template` (set `legacy: true`). ES 7 and 8 mapping formats differ, so match
+   the version. **If you can't confidently derive the template from the code,
+   STOP and ask the user to paste the production template** — then use it
+   verbatim. The CLI applies the template to the ephemeral ES before the app
+   starts.
 
    Tag the new checks for the current task (e.g. `tags: [orders]`). **Show the
    proposed `noworries.yml` (or the new checks) to the user and get their review
@@ -78,7 +99,7 @@ everything down. Exit code `0` = READY, `1` = NOT READY / error.
 ```yaml
 version: 1
 services:
-  - postgres:16-alpine     # or: kafka (=> apache/kafka), redis
+  - postgres:16-alpine     # or: kafka (=> apache/kafka), redis, elastic (=> docker.elastic.co)
 app:                       # optional; auto-detected from the framework
   start: "./mvnw spring-boot:run"
   health: "/actuator/health"

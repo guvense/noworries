@@ -309,8 +309,16 @@ fn run_checks_flow(
         return 0;
     }
 
+    // Apply Elasticsearch index templates while the infra is up but BEFORE the
+    // app starts, so app-created indices get the right mapping.
+    runner::apply_elastic_templates(selected, &handles.endpoints);
+
     let needs_app = selected.iter().any(|c| c.request.is_some())
-        || spec.app.as_ref().and_then(|a| a.start.as_ref()).is_some();
+        || spec.app.as_ref().and_then(|a| a.start.as_ref()).is_some()
+        || spec.auth.as_ref().map(|a| a.login.is_some()).unwrap_or(false);
+
+    // Variables for ${VAR} interpolation in requests/auth (from app.env).
+    let env = spec.app.as_ref().map(|a| a.env.clone()).unwrap_or_default();
 
     let app_port = if needs_app {
         report::info("");
@@ -335,11 +343,26 @@ fn run_checks_flow(
         0
     };
 
+    // Resolve auth (runs the login request if configured) now that the app is up.
+    let auth = match runner::resolve_auth(spec.auth.as_ref(), app_port, &env) {
+        Ok(a) => a,
+        Err(e) => {
+            report::error_line(&format!("auth setup failed: {e}"));
+            return 1;
+        }
+    };
+    if !auth.headers.is_empty() || !auth.query.is_empty() {
+        report::ok("authenticated (auth applied to check requests)");
+    }
+
     report::info("");
     report::info(&format!("Running {} check(s)…", selected.len()));
     let ctx = runner::RunnerContext {
         app_port,
         endpoints: handles.endpoints.clone(),
+        env,
+        auth_headers: auth.headers,
+        auth_query: auth.query,
     };
     let results = runner::run_checks(selected, &ctx);
     let summary = report::print_results(results);

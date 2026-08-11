@@ -43,9 +43,12 @@ Required, non-empty list. Each entry is `kind` or `kind:tag`. Supported kinds:
 | `kafka:3.7`         | `apache/kafka:3.7`        |
 | `redis`             | `redis:7-alpine`          |
 | `redis:7-alpine`    | `redis:7-alpine`          |
+| `elastic:8.13.4`    | `docker.elastic.co/elasticsearch/elasticsearch:8.13.4` |
+| `elasticsearch:7.17.22` | `docker.elastic.co/elasticsearch/elasticsearch:7.17.22` |
 
 Note that `kafka:<tag>` expands to the **`apache/kafka`** repository (Kafka's
-official image), not `kafka`.
+official image) and `elastic`/`elasticsearch` expand to the official
+**`docker.elastic.co/elasticsearch/elasticsearch`** image — not the bare names.
 
 ## `app` (optional)
 
@@ -65,6 +68,44 @@ the framework (currently Spring Boot via `mvnw`/`gradlew`/`pom.xml`/
 The app is started with environment variables wired to the resolved container
 ports — see [how it works](how-it-works.md#environment-wiring).
 
+## `auth` (optional)
+
+Authentication applied to **every** check's HTTP request. Extensible — set the
+sub-block(s) you need; a check's own `request.headers` override anything auth
+sets. All string values support `${VAR}` interpolation (from `app.env` or the
+process env), so tokens/passwords stay out of the repo.
+
+```yaml
+auth:
+  # 1) Log in, extract a token, send it as a header (most common):
+  login:
+    request: { method: POST, path: /auth/login, body: { username: "${TEST_USER}", password: "${TEST_PASS}" } }
+    expect: { status: 200 }
+    token_from: "$.accessToken"     # JSON path in the login response
+    header: Authorization            # optional (default Authorization)
+    scheme: Bearer                   # optional (default Bearer; "" = raw token)
+
+  # 2) A static bearer token:
+  # bearer: { token: "${API_TOKEN}" }
+
+  # 3) HTTP Basic auth:
+  # basic: { username: "${USER}", password: "${PASS}" }
+
+  # 4) API key as a header and/or query param:
+  # api_key: { header: "X-API-Key", value: "${API_KEY}" }
+  # api_key: { query: "api_key", value: "${API_KEY}" }
+```
+
+| Sub-block | Effect |
+| --------- | ------ |
+| `login`   | Runs the login request against the app, extracts `token_from` (JSON path), and adds `<scheme> <token>` to `header`. |
+| `bearer`  | Adds `<scheme> <token>` to `header` (defaults: `Bearer`, `Authorization`). |
+| `basic`   | Adds `Authorization: Basic base64(user:pass)`. |
+| `api_key` | Adds the key as a header and/or a query parameter (defaults to header `X-API-Key`). |
+
+`${VAR}` interpolation also works inside a check's `request` headers, path, and
+body — e.g. `Authorization: "Bearer ${API_TOKEN}"` on a single check.
+
 ## `checks`
 
 A list of named checks. Each check may combine HTTP, DB, Kafka, and Redis
@@ -80,6 +121,7 @@ examples in [checks](checks.md). Shape:
 | `db`      | Postgres assertion (`query`, `expect_row`, `expect_row_count`). |
 | `kafka`   | Kafka `produce` and/or `expect_message`. |
 | `redis`   | Redis `key` with `expect_exists` / `expect_value` / `expect_value_contains`. |
+| `elastic` | Elasticsearch: `index`, optional `template`, `operations` (insert/update/delete), and `doc_id`/`expect_source_contains` or `query`/`expect_hits`. |
 
 ### Tagging & scope
 

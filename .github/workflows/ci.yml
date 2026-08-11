@@ -1,0 +1,51 @@
+name: ci
+
+# Runs on every push / PR. Builds, lints, and — crucially — runs the
+# integration tests against REAL Postgres, Redis, Kafka, and Elasticsearch
+# (brought up with ci/docker-compose.yml). This is what catches client-library
+# misuse (e.g. the Kafka consumer "offset storage" bug) that compile checks and
+# unit tests cannot.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build + clippy + unit tests
+        run: |
+          cargo build --all-targets
+          cargo clippy --all-targets -- -D warnings
+          cargo test --lib
+
+      - name: Start real infrastructure
+        run: docker compose -f ci/docker-compose.yml up -d --wait
+
+      - name: Integration tests (real Postgres / Redis / Kafka / Elasticsearch)
+        env:
+          NOWORRIES_IT_KAFKA_PORT: "9092"
+          NOWORRIES_IT_ES_PORT: "9200"
+        run: cargo test --test kafka_it --test elastic_it -- --nocapture
+
+      - name: Tear down infrastructure
+        if: always()
+        run: docker compose -f ci/docker-compose.yml down -v

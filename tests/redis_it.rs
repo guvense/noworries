@@ -61,7 +61,7 @@ fn run(app_cmd: &str, pg: u16, redis: u16) -> (usize, usize, bool) {
     };
     let eps = endpoints(pg, redis);
     let mut app = start_app(Some(&app_spec), None, Path::new("."), &eps, &out_dir).expect("app starts");
-    let ctx = RunnerContext { app_port: app.port, endpoints: eps };
+    let ctx = RunnerContext::new(app.port, eps);
     let results = run_checks(&checks(), &ctx);
     app.stop();
     let passed = results.iter().filter(|r| r.passed).count();

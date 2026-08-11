@@ -6,6 +6,7 @@
 //! recorded as failing "not implemented" so a check that declares them can't
 //! silently pass.
 
+use std::collections::BTreeMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,7 @@ use serde_json::Value as Json;
 
 use crate::lifecycle::ServiceEndpoint;
 use crate::services::{PG_DB, PG_PASSWORD, PG_USER};
-use crate::spec::{CheckSpec, ServiceKind};
+use crate::spec::{AuthSpec, CheckSpec, ServiceKind};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AssertionResult {
@@ -39,6 +40,194 @@ pub struct CheckResult {
 pub struct RunnerContext {
     pub app_port: u16,
     pub endpoints: Vec<ServiceEndpoint>,
+    /// Variables available for `${VAR}` interpolation (from `app.env`; process
+    /// env is also consulted as a fallback).
+    pub env: BTreeMap<String, String>,
+    /// Headers injected into every check request (from `auth`).
+    pub auth_headers: Vec<(String, String)>,
+    /// Query params injected into every check request (from `auth`, e.g. API key).
+    pub auth_query: Vec<(String, String)>,
+}
+
+impl RunnerContext {
+    /// Minimal context (no env/auth) — convenient for tests.
+    pub fn new(app_port: u16, endpoints: Vec<ServiceEndpoint>) -> Self {
+        RunnerContext {
+            app_port,
+            endpoints,
+            env: BTreeMap::new(),
+            auth_headers: Vec::new(),
+            auth_query: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Env interpolation + auth
+// ---------------------------------------------------------------------------
+
+fn lookup_var(name: &str, env: &BTreeMap<String, String>) -> Option<String> {
+    env.get(name).cloned().or_else(|| std::env::var(name).ok())
+}
+
+/// Expand `${VAR}` references in a string using `env` then the process env.
+/// An unset variable is left as-is and a warning is printed.
+pub fn interpolate(s: &str, env: &BTreeMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find('}') {
+            let name = &after[..end];
+            match lookup_var(name, env) {
+                Some(v) => out.push_str(&v),
+                None => {
+                    crate::report::warn(&format!("env var ${{{name}}} is not set"));
+                    out.push_str(&rest[start..start + 2 + end + 1]);
+                }
+            }
+            rest = &after[end + 1..];
+        } else {
+            out.push_str(&rest[start..]);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Interpolate `${VAR}` in every string leaf of a JSON value.
+fn interpolate_json(v: &Json, env: &BTreeMap<String, String>) -> Json {
+    match v {
+        Json::String(s) => Json::String(interpolate(s, env)),
+        Json::Array(a) => Json::Array(a.iter().map(|x| interpolate_json(x, env)).collect()),
+        Json::Object(o) => {
+            Json::Object(o.iter().map(|(k, val)| (k.clone(), interpolate_json(val, env))).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Standard-alphabet base64 (for HTTP Basic auth) — avoids a dependency.
+fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 { T[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[(b2 & 0x3f) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Follow a simple JSON path (`$.a.b`, `a.b`, numeric segments = array index).
+fn json_path<'a>(v: &'a Json, path: &str) -> Option<&'a Json> {
+    let p = path.trim_start_matches('$').trim_start_matches('.');
+    if p.is_empty() {
+        return Some(v);
+    }
+    let mut cur = v;
+    for seg in p.split('.') {
+        cur = if let Ok(i) = seg.parse::<usize>() { cur.get(i)? } else { cur.get(seg)? };
+    }
+    Some(cur)
+}
+
+/// Resolved auth to apply to every check request.
+pub struct ResolvedAuth {
+    pub headers: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
+}
+
+fn header_scheme(header: &Option<String>, scheme: &Option<String>, token: String) -> (String, String) {
+    let h = header.clone().unwrap_or_else(|| "Authorization".to_string());
+    let s = scheme.clone().unwrap_or_else(|| "Bearer".to_string());
+    let value = if s.is_empty() { token } else { format!("{s} {token}") };
+    (h, value)
+}
+
+/// Turn the `auth` spec into concrete headers/query params. Runs the login
+/// request (against the app) when `auth.login` is set.
+pub fn resolve_auth(
+    auth: Option<&AuthSpec>,
+    app_port: u16,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<ResolvedAuth> {
+    let mut headers = Vec::new();
+    let mut query = Vec::new();
+    let Some(auth) = auth else {
+        return Ok(ResolvedAuth { headers, query });
+    };
+
+    if let Some(b) = &auth.basic {
+        let u = interpolate(&b.username, env);
+        let p = interpolate(&b.password, env);
+        let token = base64_encode(format!("{u}:{p}").as_bytes());
+        headers.push(("Authorization".to_string(), format!("Basic {token}")));
+    }
+
+    if let Some(b) = &auth.bearer {
+        headers.push(header_scheme(&b.header, &b.scheme, interpolate(&b.token, env)));
+    }
+
+    if let Some(k) = &auth.api_key {
+        let value = interpolate(&k.value, env);
+        match (&k.header, &k.query) {
+            (None, None) => headers.push(("X-API-Key".to_string(), value)),
+            (h, q) => {
+                if let Some(h) = h {
+                    headers.push((h.clone(), value.clone()));
+                }
+                if let Some(q) = q {
+                    query.push((q.clone(), value));
+                }
+            }
+        }
+    }
+
+    if let Some(login) = &auth.login {
+        let req = &login.request;
+        let url = format!("http://127.0.0.1:{app_port}{}", interpolate(&req.path, env));
+        let agent = ureq::builder().timeout(Duration::from_secs(15)).build();
+        let mut r = agent.request(&req.method.to_uppercase(), &url);
+        for (hk, hv) in &req.headers {
+            r = r.set(hk, &interpolate(hv, env));
+        }
+        let send = if let Some(body) = &req.body {
+            let bj = interpolate_json(&yaml_to_json(body), env);
+            r.set("content-type", "application/json").send_string(&serde_json::to_string(&bj)?)
+        } else {
+            r.call()
+        };
+        let (status, body) = match send {
+            Ok(resp) => (resp.status(), resp.into_string().unwrap_or_default()),
+            Err(ureq::Error::Status(c, resp)) => (c, resp.into_string().unwrap_or_default()),
+            Err(ureq::Error::Transport(t)) => anyhow::bail!("auth login request failed: {t}"),
+        };
+        match login.expect.as_ref().and_then(|e| e.status) {
+            Some(want) if status != want => {
+                anyhow::bail!("auth login: expected status {want}, got {status}")
+            }
+            None if !(200..300).contains(&status) => {
+                anyhow::bail!("auth login returned HTTP {status}")
+            }
+            _ => {}
+        }
+        let parsed: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
+        let token = json_path(&parsed, &login.token_from)
+            .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("auth login: token_from \"{}\" not found in response", login.token_from)
+            })?;
+        headers.push(header_scheme(&login.header, &login.scheme, token));
+    }
+
+    Ok(ResolvedAuth { headers, query })
 }
 
 /// serde_yaml value -> serde_json value, so YAML expectations compare uniformly.
@@ -95,17 +284,41 @@ fn truncate_json(v: Json) -> Json {
 
 fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) -> anyhow::Result<()> {
     let Some(req) = &check.request else { return Ok(()) };
-    let url = format!("http://127.0.0.1:{}{}", ctx.app_port, req.path);
+    let path = interpolate(&req.path, &ctx.env);
+    let mut url = format!("http://127.0.0.1:{}{}", ctx.app_port, path);
+    // Auth query params (e.g. an API key) applied to every request.
+    if !ctx.auth_query.is_empty() {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let qs = ctx
+            .auth_query
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        url = format!("{url}{sep}{qs}");
+    }
+
+    // Headers: auth first, then the check's own headers (which override), with
+    // ${VAR} interpolation on the check's header values.
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &ctx.auth_headers {
+        headers.insert(k.clone(), v.clone());
+    }
+    for (k, v) in &req.headers {
+        headers.insert(k.clone(), interpolate(v, &ctx.env));
+    }
+
     let agent = ureq::builder().timeout(Duration::from_secs(15)).build();
     let mut request = agent.request(&req.method.to_uppercase(), &url);
-    for (k, v) in &req.headers {
+    for (k, v) in &headers {
         request = request.set(k, v);
     }
 
     let send_result = if let Some(body) = &req.body {
         let body_str = match body {
-            serde_yaml::Value::String(s) => s.clone(),
-            other => serde_json::to_string(&yaml_to_json(other)).unwrap_or_default(),
+            serde_yaml::Value::String(s) => interpolate(s, &ctx.env),
+            other => serde_json::to_string(&interpolate_json(&yaml_to_json(other), &ctx.env))
+                .unwrap_or_default(),
         };
         request.set("content-type", "application/json").send_string(&body_str)
     } else {
@@ -470,11 +683,15 @@ fn kafka_expect(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionR
     let expected_for_match = expected.clone();
 
     let found = (|| -> anyhow::Result<bool> {
-        use kafka::consumer::{Consumer, FetchOffset};
+        use kafka::consumer::{Consumer, FetchOffset, GroupOffsetStorage};
         let mut consumer = Consumer::from_hosts(vec![host.clone()])
             .with_topic(expect.topic.clone())
             .with_fallback_offset(FetchOffset::Earliest)
             .with_group(unique_group())
+            // Required by the kafka crate once a group is set — without it,
+            // polling fails with "Operation requires offset storage but no
+            // offset storage was set".
+            .with_offset_storage(Some(GroupOffsetStorage::Kafka))
             .create()?;
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -522,6 +739,213 @@ fn kafka_expect(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionR
     }
 }
 
+// ---------------------------------------------------------------------------
+// Elasticsearch
+// ---------------------------------------------------------------------------
+
+fn fail_elastic(message: String) -> AssertionResult {
+    AssertionResult { kind: "elastic".into(), passed: false, message, expected: None, actual: None }
+}
+
+fn es_request(
+    base: &str,
+    method: &str,
+    path: &str,
+    body: Option<&Json>,
+) -> anyhow::Result<(u16, String)> {
+    let url = format!("{base}{path}");
+    let agent = ureq::builder().timeout(Duration::from_secs(15)).build();
+    let req = agent.request(method, &url).set("content-type", "application/json");
+    let result = match body {
+        Some(b) => req.send_string(&serde_json::to_string(b)?),
+        None => req.call(),
+    };
+    match result {
+        Ok(resp) => Ok((resp.status(), resp.into_string().unwrap_or_default())),
+        Err(ureq::Error::Status(code, resp)) => Ok((code, resp.into_string().unwrap_or_default())),
+        Err(ureq::Error::Transport(t)) => anyhow::bail!("Elasticsearch request failed: {t}"),
+    }
+}
+
+fn elastic_base_from(endpoints: &[ServiceEndpoint]) -> Option<String> {
+    endpoints
+        .iter()
+        .find(|e| e.kind == ServiceKind::Elastic)
+        .map(|e| format!("http://127.0.0.1:{}", e.host_port))
+}
+
+fn elastic_base(ctx: &RunnerContext) -> Option<String> {
+    elastic_base_from(&ctx.endpoints)
+}
+
+/// Apply the index templates declared by the selected checks. Run BEFORE the
+/// app starts so app-created indices pick up the mapping. Uses `_index_template`
+/// (ES 7.8+/8) or the legacy `_template` when `legacy: true`.
+pub fn apply_elastic_templates(checks: &[CheckSpec], endpoints: &[ServiceEndpoint]) {
+    let Some(base) = elastic_base_from(endpoints) else { return };
+    for check in checks {
+        let Some(e) = &check.elastic else { continue };
+        let Some(tpl) = &e.template else { continue };
+        let body = yaml_to_json(&tpl.body);
+        let path = if tpl.legacy {
+            format!("/_template/{}", tpl.name)
+        } else {
+            format!("/_index_template/{}", tpl.name)
+        };
+        match es_request(&base, "PUT", &path, Some(&body)) {
+            Ok((s, _)) if (200..300).contains(&s) => {
+                crate::report::ok(&format!("applied Elasticsearch template \"{}\"", tpl.name));
+            }
+            Ok((s, b)) => crate::report::warn(&format!(
+                "Elasticsearch template \"{}\" -> HTTP {s}: {}",
+                tpl.name,
+                b.chars().take(200).collect::<String>()
+            )),
+            Err(e) => crate::report::warn(&format!("Elasticsearch template \"{}\" failed: {e}", tpl.name)),
+        }
+    }
+}
+
+fn es_ok(message: String) -> AssertionResult {
+    AssertionResult { kind: "elastic".into(), passed: true, message, expected: None, actual: None }
+}
+
+fn exec_elastic_op(base: &str, index: &str, op: &crate::spec::ElasticOp) -> AssertionResult {
+    if let Some(ins) = &op.insert {
+        let doc = yaml_to_json(&ins.document);
+        let (method, path) = match &ins.id {
+            Some(i) => ("PUT", format!("/{index}/_doc/{i}?refresh=true")),
+            None => ("POST", format!("/{index}/_doc?refresh=true")),
+        };
+        return match es_request(base, method, &path, Some(&doc)) {
+            Ok((s, _)) if (200..300).contains(&s) => es_ok(format!("indexed document into \"{index}\"")),
+            Ok((s, b)) => fail_elastic(format!("insert into \"{index}\" -> HTTP {s}: {}", b.chars().take(200).collect::<String>())),
+            Err(e) => fail_elastic(format!("insert failed: {e}")),
+        };
+    }
+    if let Some(up) = &op.update {
+        let body = serde_json::json!({ "doc": yaml_to_json(&up.document) });
+        let path = format!("/{index}/_update/{}?refresh=true", up.id);
+        return match es_request(base, "POST", &path, Some(&body)) {
+            Ok((s, _)) if (200..300).contains(&s) => es_ok(format!("updated document \"{}\" in \"{index}\"", up.id)),
+            Ok((s, b)) => fail_elastic(format!("update \"{}\" -> HTTP {s}: {}", up.id, b.chars().take(200).collect::<String>())),
+            Err(e) => fail_elastic(format!("update failed: {e}")),
+        };
+    }
+    if let Some(del) = &op.delete {
+        let path = format!("/{index}/_doc/{}?refresh=true", del.id);
+        return match es_request(base, "DELETE", &path, None) {
+            // 404 = already absent; treat delete as idempotent success.
+            Ok((s, _)) if (200..300).contains(&s) || s == 404 => es_ok(format!("deleted document \"{}\" from \"{index}\"", del.id)),
+            Ok((s, b)) => fail_elastic(format!("delete \"{}\" -> HTTP {s}: {}", del.id, b.chars().take(200).collect::<String>())),
+            Err(e) => fail_elastic(format!("delete failed: {e}")),
+        };
+    }
+    fail_elastic("operation has no insert/update/delete".into())
+}
+
+fn verify_elastic(base: &str, e: &crate::spec::ElasticAssertion) -> Vec<AssertionResult> {
+    let mut out = Vec::new();
+
+    if let Some(id) = &e.doc_id {
+        match es_request(base, "GET", &format!("/{}/_doc/{}", e.index, id), None) {
+            Ok((status, body)) => {
+                let found = status == 200;
+                if let Some(want) = e.expect_exists {
+                    out.push(AssertionResult {
+                        kind: "elastic".into(),
+                        passed: found == want,
+                        message: if found == want {
+                            format!("document \"{id}\" exists = {found}")
+                        } else {
+                            format!("document \"{id}\": expected exists={want}, got {found}")
+                        },
+                        expected: Some(Json::Bool(want)),
+                        actual: Some(Json::Bool(found)),
+                    });
+                }
+                if let Some(exp) = &e.expect_source_contains {
+                    let parsed: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
+                    let source = parsed.get("_source").cloned().unwrap_or(Json::Null);
+                    let expected = yaml_to_json(exp);
+                    let passed = matches_subset(&expected, &source);
+                    out.push(AssertionResult {
+                        kind: "elastic".into(),
+                        passed,
+                        message: if passed {
+                            format!("document \"{id}\" _source contains expected fields")
+                        } else {
+                            format!("document \"{id}\" _source did not contain expected fields")
+                        },
+                        expected: Some(expected),
+                        actual: Some(truncate_json(source)),
+                    });
+                }
+            }
+            Err(err) => out.push(fail_elastic(err.to_string())),
+        }
+    }
+
+    if let Some(q) = &e.query {
+        let body = serde_json::json!({ "query": yaml_to_json(q) });
+        match es_request(base, "POST", &format!("/{}/_search", e.index), Some(&body)) {
+            Ok((_status, resp)) => {
+                let parsed: Json = serde_json::from_str(&resp).unwrap_or(Json::Null);
+                // hits.total.value (object form) or hits.total (rest_total_hits_as_int).
+                let hits = parsed
+                    .pointer("/hits/total/value")
+                    .and_then(|v| v.as_i64())
+                    .or_else(|| parsed.pointer("/hits/total").and_then(|v| v.as_i64()))
+                    .unwrap_or(-1);
+                if let Some(expect) = e.expect_hits {
+                    out.push(AssertionResult {
+                        kind: "elastic".into(),
+                        passed: hits == expect,
+                        message: if hits == expect {
+                            format!("search returned {hits} hit(s)")
+                        } else {
+                            format!("expected {expect} hit(s), got {hits}")
+                        },
+                        expected: Some(Json::from(expect)),
+                        actual: Some(Json::from(hits)),
+                    });
+                }
+            }
+            Err(err) => out.push(fail_elastic(err.to_string())),
+        }
+    }
+
+    out
+}
+
+fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+    let Some(e) = &check.elastic else { return };
+    let Some(base) = elastic_base(ctx) else {
+        out.push(fail_elastic("elastic assertion but no Elasticsearch service is running".into()));
+        return;
+    };
+
+    // noworries-run operations (setup / trigger), executed in order.
+    for op in &e.operations {
+        out.push(exec_elastic_op(&base, &e.index, op));
+    }
+
+    // Verification (of the operations' effect and/or the app's writes), retried
+    // for eventual consistency.
+    let has_verification =
+        e.doc_id.is_some() || e.query.is_some();
+    if !has_verification {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let mut last = verify_elastic(&base, e);
+    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+        sleep(Duration::from_millis(400));
+        last = verify_elastic(&base, e);
+    }
+    out.extend(last);
+}
+
 /// Run every selected check sequentially and collect results.
 pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult> {
     let mut results = Vec::new();
@@ -546,6 +970,7 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
                     .unwrap_or(false);
             run_db(check, ctx, async_effect, &mut assertions);
             run_redis(check, ctx, async_effect, &mut assertions);
+            run_elastic(check, ctx, async_effect, &mut assertions);
             kafka_expect(check, ctx, &mut assertions);
             if assertions.is_empty() {
                 error = Some("check declares no assertions (add request/expect, db, ...)".into());
@@ -596,5 +1021,45 @@ mod tests {
         let exp = json!({"status": "PENDING"});
         let act = json!({"other": 1});
         assert!(!matches_subset(&exp, &act));
+    }
+
+    #[test]
+    fn interpolate_expands_from_env_map() {
+        let mut env = BTreeMap::new();
+        env.insert("TOKEN".to_string(), "abc123".to_string());
+        assert_eq!(interpolate("Bearer ${TOKEN}", &env), "Bearer abc123");
+        // unknown var is left verbatim
+        assert_eq!(interpolate("x ${NOPE} y", &env), "x ${NOPE} y");
+    }
+
+    #[test]
+    fn base64_matches_known_vectors() {
+        assert_eq!(base64_encode(b"user:pass"), "dXNlcjpwYXNz");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn json_path_traverses_objects_and_arrays() {
+        let v = json!({"data": {"tokens": ["t0", "t1"]}});
+        assert_eq!(json_path(&v, "$.data.tokens.1").unwrap(), &json!("t1"));
+        assert_eq!(json_path(&v, "data.tokens.0").unwrap(), &json!("t0"));
+        assert!(json_path(&v, "data.missing").is_none());
+    }
+
+    #[test]
+    fn resolve_basic_bearer_apikey_without_app() {
+        use crate::spec::{AuthApiKey, AuthBasic, AuthBearer, AuthSpec};
+        let env = BTreeMap::new();
+        let auth = AuthSpec {
+            basic: Some(AuthBasic { username: "user".into(), password: "pass".into() }),
+            bearer: Some(AuthBearer { token: "T".into(), header: None, scheme: None }),
+            api_key: Some(AuthApiKey { header: Some("X-API-Key".into()), query: None, value: "K".into() }),
+            login: None,
+        };
+        let r = resolve_auth(Some(&auth), 0, &env).unwrap();
+        assert!(r.headers.iter().any(|(k, v)| k == "Authorization" && v == "Basic dXNlcjpwYXNz"));
+        assert!(r.headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer T"));
+        assert!(r.headers.iter().any(|(k, v)| k == "X-API-Key" && v == "K"));
     }
 }

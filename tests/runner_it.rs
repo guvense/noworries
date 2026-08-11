@@ -63,10 +63,7 @@ fn run_scenario(app_cmd: &str, pg_port: u16) -> noworries::report::ReportSummary
     let eps = endpoints(pg_port);
     let mut app = start_app(Some(&app_spec), None, Path::new("."), &eps, &out_dir)
         .expect("app should start and become ready");
-    let ctx = RunnerContext {
-        app_port: app.port,
-        endpoints: eps,
-    };
+    let ctx = RunnerContext::new(app.port, eps);
     let results = run_checks(&checks(), &ctx);
     app.stop();
     // Build a summary without printing (mirror report::print_results counting).

@@ -141,7 +141,7 @@ writes the checks for you, runs them, and fixes the code if they fail. Use
 ```yaml
 version: 1
 services:
-  - postgres:16-alpine        # also: kafka, redis
+  - postgres:16-alpine        # also: kafka, redis, elastic
 app:                          # optional; auto-detected from the framework
   start: "./mvnw spring-boot:run"
   health: "/actuator/health"
@@ -160,11 +160,12 @@ check types: **[docs/checks.md](docs/checks.md)**.
 
 ## Supported services & frameworks
 
-| Services  | Frameworks                        |
-| --------- | --------------------------------- |
-| Postgres  | Spring Boot (auto-detected)       |
-| Kafka     | *(architecture is framework-agnostic —* |
-| Redis     | *adding Go etc. is one adapter)*  |
+| Services       | Frameworks                        |
+| -------------- | --------------------------------- |
+| Postgres       | Spring Boot (auto-detected)       |
+| Kafka          | *(architecture is framework-agnostic —* |
+| Redis          | *adding Go etc. is one adapter)*  |
+| Elasticsearch  | *(ES 7 & 8)*                      |
 
 Adding a new service or framework is a single trait implementation — see
 **[docs/architecture.md](docs/architecture.md)**.
