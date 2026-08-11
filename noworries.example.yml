@@ -1,0 +1,21 @@
+version: 1
+
+# Infrastructure this feature needs. Supported: postgres, kafka, redis.
+services:
+  - postgres:16-alpine
+
+# How to launch the app under test. Optional — auto-detected from the framework
+# (Spring Boot today) when omitted. `framework:` can force a specific adapter.
+# app:
+#   start: "./mvnw spring-boot:run"
+#   health: "/actuator/health"
+#   ready_timeout: 180
+
+checks:
+  - name: "app health endpoint responds"
+    tags: [smoke]
+    request:
+      method: GET
+      path: /actuator/health
+    expect:
+      status: 200

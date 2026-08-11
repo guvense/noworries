@@ -1,0 +1,30 @@
+{
+  "name": "noworries",
+  "version": "0.1.0",
+  "description": "Ephemeral infra harness that lets an AI verify the changes it just made (Postgres/Kafka/Redis + the /noworries Claude Code command).",
+  "bin": {
+    "noworries": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node ./install.js"
+  },
+  "files": [
+    "bin/cli.js",
+    "install.js",
+    "README.md"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/guvense/noworries",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/guvense/noworries.git"
+  }
+}
