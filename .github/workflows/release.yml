@@ -71,7 +71,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        # No --locked: a version bump in Cargo.toml would otherwise desync
+        # Cargo.lock and fail here. Dependency versions stay pinned by the
+        # committed lock; only the package's own version entry is refreshed.
+        run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
