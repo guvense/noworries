@@ -148,14 +148,32 @@ into `~/.claude/commands`, or `--project` for one repo).
 
 ## Releasing (for maintainers)
 
-1. Bump `version` in `Cargo.toml` (and `dist/npm/package.json`).
-2. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. The GitHub Actions
-   workflow (`.github/workflows/release.yml`) builds macOS arm64/x64 + Linux x64
-   binaries, packages `noworries-<target>.tar.gz` + `.sha256`, and attaches them
-   to the Release.
-3. `install.sh` and npm pick up the release automatically. For Homebrew, update
-   `version` + the three `sha256` values in the tap's `noworries.rb` (from the
-   uploaded `.sha256` files).
+Releases are automated on merge to `main`. The whole flow is driven by the
+`version` in `Cargo.toml` (single source of truth):
+
+1. In your PR, bump `version` in `Cargo.toml`.
+2. Merge to `main`. `.github/workflows/release.yml` then, **only if that version
+   has no `v<version>` tag yet**:
+   - builds macOS arm64/x64 + Linux x64 binaries and creates the GitHub Release
+     (`noworries-<target>.tar.gz` + `.sha256`),
+   - publishes to **npm** (syncing `dist/npm/package.json` to the version),
+   - updates the **Homebrew tap** (`guvense/homebrew-noworries`, `Formula/
+     noworries.rb`) with the new version + checksums.
+
+   Pushing commits to `main` without bumping the version does nothing (the tag
+   already exists) — so ordinary merges don't cut releases.
+
+One-time setup:
+
+- Repo secrets: `NPM_TOKEN` (npm automation token) and `HOMEBREW_TAP_TOKEN` (a
+  PAT with `repo` scope on the tap).
+- Create the tap repo `guvense/homebrew-noworries` (empty is fine; the workflow
+  writes `Formula/noworries.rb` into it).
+- If the npm name `noworries` is taken, switch to a scoped name
+  (`@guvense/noworries`) in `dist/npm/package.json`.
+
+You can also trigger a release manually from the Actions tab
+(`workflow_dispatch`).
 
 ## Using it as `/noworries` in Claude Code
 
