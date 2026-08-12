@@ -10,11 +10,15 @@ use crate::spec::{ServiceDecl, ServiceKind};
 
 pub mod elastic;
 pub mod kafka;
+pub mod mongodb;
+pub mod mysql;
 pub mod postgres;
 pub mod redis;
 
 pub use elastic::Elastic;
 pub use kafka::Kafka;
+pub use mongodb::Mongodb;
+pub use mysql::Mysql;
 pub use postgres::{postgres_jdbc, Postgres};
 pub use redis::Redis;
 
@@ -76,5 +80,7 @@ pub fn provider_for(kind: ServiceKind) -> Option<Box<dyn ServiceProvider>> {
         ServiceKind::Kafka => Some(Box::new(Kafka)),
         ServiceKind::Redis => Some(Box::new(Redis)),
         ServiceKind::Elastic => Some(Box::new(Elastic)),
+        ServiceKind::Mysql => Some(Box::new(Mysql)),
+        ServiceKind::Mongodb => Some(Box::new(Mongodb)),
     }
 }

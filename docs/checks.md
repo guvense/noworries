@@ -154,6 +154,35 @@ The Elasticsearch container runs single-node with security disabled (plain HTTP)
 which works for both ES 7 and 8. Declare it as `elastic:8.13.4` /
 `elasticsearch:7.17.22` (expands to `docker.elastic.co/elasticsearch/elasticsearch`).
 
+## MySQL
+
+The "seed data → hit the API → check what changed" flow: `seed` statements run
+**before** the request, then `query` verifies the result afterwards.
+
+```yaml
+- name: "reprice endpoint updates the order"
+  request: { method: POST, path: /orders/ABC/reprice, body: { price: 120 } }
+  expect:  { status: 200 }
+  mysql:
+    seed:
+      - "INSERT INTO orders (sku, price, status) VALUES ('ABC', 100, 'NEW')"
+    query: "SELECT price, status FROM orders WHERE sku = 'ABC'"
+    expect_row: { price: 120, status: "REPRICED" }
+    expect_row_count: 1
+```
+
+`seed` runs before the request regardless of where the `mysql` block appears in
+the check.
+
+- `seed` — a list of raw SQL statements (INSERT/UPDATE/DELETE/DDL) executed in
+  order **before** the request, so a read-then-update feature has data to act on.
+- `query` + `expect_row` (deep subset match on the first row) /
+  `expect_row_count` — verification, retried briefly when the check also has a
+  request (for async writes).
+
+(The container uses `user/password/db = noworries`. Declare it as `mysql` /
+`mysql:8.0` → `mysql:8.4` by default.)
+
 ## Reading results
 
 Every run prints a `=== noworries results ===` block and writes

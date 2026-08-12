@@ -45,6 +45,9 @@ Required, non-empty list. Each entry is `kind` or `kind:tag`. Supported kinds:
 | `redis:7-alpine`    | `redis:7-alpine`          |
 | `elastic:8.13.4`    | `docker.elastic.co/elasticsearch/elasticsearch:8.13.4` |
 | `elasticsearch:7.17.22` | `docker.elastic.co/elasticsearch/elasticsearch:7.17.22` |
+| `mysql`             | `mysql:8.4`               |
+| `mysql:8.0`         | `mysql:8.0`               |
+| `mongodb` / `mongo` | `mongo:7`                 |
 
 Note that `kafka:<tag>` expands to the **`apache/kafka`** repository (Kafka's
 official image) and `elastic`/`elasticsearch` expand to the official
@@ -98,13 +101,33 @@ auth:
 
 | Sub-block | Effect |
 | --------- | ------ |
-| `login`   | Runs the login request against the app, extracts `token_from` (JSON path), and adds `<scheme> <token>` to `header`. |
+| `login`   | Runs the login request, extracts `token_from` (JSON path), and adds `<scheme> <token>` to `header`. The login `path` hits the app under test when relative (`/auth/login`), or a **separate auth server** when it's an absolute URL (`https://auth.example.com/oauth/token`, or `${AUTH_URL}/token`). |
 | `bearer`  | Adds `<scheme> <token>` to `header` (defaults: `Bearer`, `Authorization`). |
 | `basic`   | Adds `Authorization: Basic base64(user:pass)`. |
 | `api_key` | Adds the key as a header and/or a query parameter (defaults to header `X-API-Key`). |
 
 `${VAR}` interpolation also works inside a check's `request` headers, path, and
 body — e.g. `Authorization: "Bearer ${API_TOKEN}"` on a single check.
+
+### Where `${VAR}` values come from
+
+At run time noworries resolves `${VAR}` from, in increasing precedence:
+
+1. `app.env` in `noworries.yml` (non-secret defaults),
+2. a **`.noworries.env`** file in the project root (dotenv format, `KEY=VALUE`,
+   `#` comments) — **gitignored by default**, so this is where secrets like
+   tokens/passwords go,
+3. the **process environment** (a shell `export` or a CI secret) — overrides the
+   file, so CI can inject real credentials.
+
+```dotenv
+# .noworries.env  (never committed)
+TEST_USER=alice
+TEST_PASS=s3cret
+API_TOKEN=eyJhbGciOi...
+```
+
+An unset variable is left literal and a warning is printed.
 
 ## `checks`
 
@@ -122,6 +145,8 @@ examples in [checks](checks.md). Shape:
 | `kafka`   | Kafka `produce` and/or `expect_message`. |
 | `redis`   | Redis `key` with `expect_exists` / `expect_value` / `expect_value_contains`. |
 | `elastic` | Elasticsearch: `index`, optional `template`, `operations` (insert/update/delete), and `doc_id`/`expect_source_contains` or `query`/`expect_hits`. |
+| `mysql`   | MySQL: `seed` SQL (run before the request), `query` + `expect_row`/`expect_row_count`. |
+| `mongodb` | MongoDB: `database`, `collection`, `seed` (insert/update/delete), `find` + `expect_doc_contains`/`expect_count`. |
 
 ### Tagging & scope
 

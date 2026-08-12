@@ -67,6 +67,20 @@ impl Framework for SpringBoot {
                         format!("http://127.0.0.1:{}", ep.host_port),
                     );
                 }
+                ServiceKind::Mysql => {
+                    m.insert(
+                        "SPRING_DATASOURCE_URL".to_string(),
+                        format!("jdbc:mysql://127.0.0.1:{}/noworries", ep.host_port),
+                    );
+                    m.insert("SPRING_DATASOURCE_USERNAME".to_string(), "noworries".to_string());
+                    m.insert("SPRING_DATASOURCE_PASSWORD".to_string(), "noworries".to_string());
+                }
+                ServiceKind::Mongodb => {
+                    m.insert(
+                        "SPRING_DATA_MONGODB_URI".to_string(),
+                        format!("mongodb://127.0.0.1:{}", ep.host_port),
+                    );
+                }
             }
         }
         m

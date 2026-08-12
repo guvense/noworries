@@ -19,6 +19,8 @@ pub enum ServiceKind {
     Kafka,
     Redis,
     Elastic,
+    Mysql,
+    Mongodb,
 }
 
 impl ServiceKind {
@@ -28,6 +30,8 @@ impl ServiceKind {
             ServiceKind::Kafka => "kafka",
             ServiceKind::Redis => "redis",
             ServiceKind::Elastic => "elastic",
+            ServiceKind::Mysql => "mysql",
+            ServiceKind::Mongodb => "mongodb",
         }
     }
 
@@ -37,6 +41,8 @@ impl ServiceKind {
             "kafka" => Some(ServiceKind::Kafka),
             "redis" => Some(ServiceKind::Redis),
             "elastic" | "elasticsearch" => Some(ServiceKind::Elastic),
+            "mysql" => Some(ServiceKind::Mysql),
+            "mongodb" | "mongo" => Some(ServiceKind::Mongodb),
             _ => None,
         }
     }
@@ -59,6 +65,8 @@ pub fn default_repo(kind: ServiceKind) -> &'static str {
         ServiceKind::Kafka => "apache/kafka",
         ServiceKind::Redis => "redis",
         ServiceKind::Elastic => "docker.elastic.co/elasticsearch/elasticsearch",
+        ServiceKind::Mysql => "mysql",
+        ServiceKind::Mongodb => "mongo",
     }
 }
 
@@ -69,6 +77,8 @@ pub fn default_image(kind: ServiceKind) -> &'static str {
         ServiceKind::Kafka => "apache/kafka:3.7.0",
         ServiceKind::Redis => "redis:7-alpine",
         ServiceKind::Elastic => "docker.elastic.co/elasticsearch/elasticsearch:8.13.4",
+        ServiceKind::Mysql => "mysql:8.4",
+        ServiceKind::Mongodb => "mongo:7",
     }
 }
 
@@ -325,6 +335,64 @@ pub struct AuthApiKey {
     pub value: String,
 }
 
+/// MySQL assertion. `seed` statements run BEFORE the request (to set up data);
+/// `query` + `expect_row`/`expect_row_count` verify state afterwards. This is
+/// the "seed data -> hit the API -> check what changed" flow.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MySqlAssertion {
+    /// Raw SQL statements executed before the request, in order (INSERT/UPDATE/
+    /// DELETE/DDL) to seed initial data.
+    #[serde(default)]
+    pub seed: Vec<String>,
+    /// A SELECT used for verification.
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub expect_row: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub expect_row_count: Option<i64>,
+}
+
+/// A noworries-run MongoDB operation (seed/trigger). Exactly one of
+/// `insert` / `update` / `delete` per entry.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoOp {
+    #[serde(default)]
+    pub insert: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub update: Option<MongoUpdate>,
+    #[serde(default)]
+    pub delete: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoUpdate {
+    pub filter: serde_yaml::Value,
+    /// Fields to `$set` on the matched documents.
+    pub set: serde_yaml::Value,
+}
+
+/// MongoDB assertion. `seed` operations run before the request; `find` +
+/// `expect_doc_contains` / `expect_count` verify afterwards.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MongoAssertion {
+    pub database: String,
+    pub collection: String,
+    #[serde(default)]
+    pub seed: Vec<MongoOp>,
+    /// Filter (Mongo query document) used for verification.
+    #[serde(default)]
+    pub find: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub expect_doc_contains: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub expect_count: Option<i64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckSpec {
@@ -343,6 +411,10 @@ pub struct CheckSpec {
     pub redis: Option<RedisAssertion>,
     #[serde(default)]
     pub elastic: Option<ElasticAssertion>,
+    #[serde(default)]
+    pub mysql: Option<MySqlAssertion>,
+    #[serde(default)]
+    pub mongodb: Option<MongoAssertion>,
 }
 
 /// Raw shape as it appears on disk (services are strings here).
@@ -453,7 +525,24 @@ mod tests {
 
     #[test]
     fn unknown_service_is_rejected() {
-        assert!(NoworriesSpec::parse("version: 1\nservices: [mysql:8]\n").is_err());
+        assert!(NoworriesSpec::parse("version: 1\nservices: [mariadb:11]\n").is_err());
+    }
+
+    #[test]
+    fn mysql_image_expansion() {
+        let s = parse_services("version: 1\nservices: [mysql:8.4, mysql]\n");
+        assert_eq!(s[0].kind, ServiceKind::Mysql);
+        assert_eq!(s[0].image, "mysql:8.4");
+        assert_eq!(s[1].image, "mysql:8.4");
+    }
+
+    #[test]
+    fn mongo_tokens_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [mongodb:7, mongo]\n");
+        assert_eq!(s[0].kind, ServiceKind::Mongodb);
+        assert_eq!(s[0].image, "mongo:7");
+        assert_eq!(s[1].kind, ServiceKind::Mongodb);
+        assert_eq!(s[1].image, "mongo:7");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! lifecycle (up / health / teardown). App start + checks + Kafka/Redis land in
 //! later phases.
 
+use std::collections::BTreeMap;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -105,6 +106,24 @@ fn run_teardown() {
         }
         let _ = lifecycle::down(&t.project, &t.file);
     }
+}
+
+const ENV_FILE: &str = ".noworries.env";
+
+/// Load `${VAR}` values from a gitignored `.noworries.env` (dotenv-style:
+/// `KEY=VALUE` lines, `#` comments, optional surrounding quotes). This keeps
+/// secrets (tokens, passwords) out of `noworries.yml` and out of git while
+/// staying on disk so you don't have to `export` them every run.
+fn load_env_file(dir: &str) -> BTreeMap<String, String> {
+    let path = Path::new(dir).join(ENV_FILE);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    let m = runner::parse_env_file(&content);
+    if !m.is_empty() {
+        report::info(&format!("loaded {} variable(s) from {ENV_FILE}", m.len()));
+    }
+    m
 }
 
 fn short_run_id() -> String {
@@ -317,8 +336,12 @@ fn run_checks_flow(
         || spec.app.as_ref().and_then(|a| a.start.as_ref()).is_some()
         || spec.auth.as_ref().map(|a| a.login.is_some()).unwrap_or(false);
 
-    // Variables for ${VAR} interpolation in requests/auth (from app.env).
-    let env = spec.app.as_ref().map(|a| a.env.clone()).unwrap_or_default();
+    // Variables for ${VAR} interpolation in requests/auth. Precedence (low->high
+    // at lookup time): app.env < .noworries.env file < process env.
+    let mut env = spec.app.as_ref().map(|a| a.env.clone()).unwrap_or_default();
+    for (k, v) in load_env_file(dir) {
+        env.insert(k, v);
+    }
 
     let app_port = if needs_app {
         report::info("");

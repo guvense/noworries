@@ -1,6 +1,6 @@
 [package]
 name = "noworries"
-version = "0.1.2"
+version = "0.2.1"
 edition = "2021"
 description = "Ephemeral infra harness that lets an AI verify the changes it just made — stand up the dependencies a feature needs, exercise them, and report READY/NOT READY."
 license = "MIT"
@@ -23,6 +23,10 @@ libc = "0.2"
 # this avoids a system OpenSSL build dependency. Keep gzip/snappy (pure-Rust).
 kafka = { version = "0.10", default-features = false, features = ["gzip", "snappy"] }
 redis = "0.27"
+# minimal features -> no native-tls/openssl (we only talk plaintext to localhost).
+mysql = { version = "25", default-features = false, features = ["minimal"] }
+# sync feature (bundles its own runtime); no TLS -> no openssl (localhost plaintext).
+mongodb = { version = "2.8", default-features = false, features = ["sync"] }
 
 [profile.release]
 strip = true

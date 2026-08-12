@@ -67,7 +67,9 @@ impl RunnerContext {
 // ---------------------------------------------------------------------------
 
 fn lookup_var(name: &str, env: &BTreeMap<String, String>) -> Option<String> {
-    env.get(name).cloned().or_else(|| std::env::var(name).ok())
+    // Process env wins (so CI / shell exports can override), then the merged
+    // app.env + .noworries.env map.
+    std::env::var(name).ok().or_else(|| env.get(name).cloned())
 }
 
 /// Expand `${VAR}` references in a string using `env` then the process env.
@@ -95,6 +97,32 @@ pub fn interpolate(s: &str, env: &BTreeMap<String, String>) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Parse dotenv-style content (`KEY=VALUE` lines, `#` comments, optional
+/// surrounding quotes) into a map. Used for the gitignored `.noworries.env`.
+pub fn parse_env_file(content: &str) -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let k = k.trim();
+            let mut v = v.trim();
+            if v.len() >= 2
+                && ((v.starts_with('"') && v.ends_with('"'))
+                    || (v.starts_with('\'') && v.ends_with('\'')))
+            {
+                v = &v[1..v.len() - 1];
+            }
+            if !k.is_empty() {
+                m.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    m
 }
 
 /// Interpolate `${VAR}` in every string leaf of a JSON value.
@@ -192,7 +220,14 @@ pub fn resolve_auth(
 
     if let Some(login) = &auth.login {
         let req = &login.request;
-        let url = format!("http://127.0.0.1:{app_port}{}", interpolate(&req.path, env));
+        // The login endpoint may be the app under test (relative path) OR a
+        // separate auth server (absolute URL, possibly via `${AUTH_URL}`).
+        let raw = interpolate(&req.path, env);
+        let url = if raw.starts_with("http://") || raw.starts_with("https://") {
+            raw
+        } else {
+            format!("http://127.0.0.1:{app_port}{raw}")
+        };
         let agent = ureq::builder().timeout(Duration::from_secs(15)).build();
         let mut r = agent.request(&req.method.to_uppercase(), &url);
         for (hk, hv) in &req.headers {
@@ -946,12 +981,325 @@ fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Ve
     out.extend(last);
 }
 
+// ---------------------------------------------------------------------------
+// MySQL  (seed -> [request] -> verify)
+// ---------------------------------------------------------------------------
+
+fn fail_mysql(message: String) -> AssertionResult {
+    AssertionResult { kind: "mysql".into(), passed: false, message, expected: None, actual: None }
+}
+
+fn mysql_conn(port: u16) -> mysql::Result<mysql::Conn> {
+    use crate::services::mysql::{MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER};
+    let url = format!("mysql://{MYSQL_USER}:{MYSQL_PASSWORD}@127.0.0.1:{port}/{MYSQL_DB}");
+    mysql::Conn::new(mysql::Opts::from_url(&url)?)
+}
+
+fn mysql_value_to_json(v: mysql::Value) -> Json {
+    match v {
+        mysql::Value::NULL => Json::Null,
+        mysql::Value::Bytes(b) => Json::String(String::from_utf8_lossy(&b).into_owned()),
+        mysql::Value::Int(i) => Json::from(i),
+        mysql::Value::UInt(u) => Json::from(u),
+        mysql::Value::Float(f) => serde_json::to_value(f).unwrap_or(Json::Null),
+        mysql::Value::Double(d) => serde_json::to_value(d).unwrap_or(Json::Null),
+        mysql::Value::Date(y, mo, d, h, mi, s, us) => {
+            Json::String(format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}.{us:06}"))
+        }
+        mysql::Value::Time(neg, days, h, mi, s, us) => Json::String(format!(
+            "{}{days}d {h:02}:{mi:02}:{s:02}.{us:06}",
+            if neg { "-" } else { "" }
+        )),
+    }
+}
+
+fn mysql_row_to_json(row: &mysql::Row) -> Json {
+    let mut map = serde_json::Map::new();
+    for (i, col) in row.columns_ref().iter().enumerate() {
+        let val: mysql::Value = row.get(i).unwrap_or(mysql::Value::NULL);
+        map.insert(col.name_str().to_string(), mysql_value_to_json(val));
+    }
+    Json::Object(map)
+}
+
+/// Run the check's MySQL `seed` statements. Called before the request.
+fn run_mysql_seed(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) {
+    use mysql::prelude::Queryable;
+    let Some(m) = &check.mysql else { return };
+    if m.seed.is_empty() {
+        return;
+    }
+    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Mysql) else {
+        out.push(fail_mysql("mysql seed but no MySQL service is running".into()));
+        return;
+    };
+    let mut conn = match mysql_conn(ep.host_port) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(fail_mysql(format!("could not connect to MySQL: {e}")));
+            return;
+        }
+    };
+    for stmt in &m.seed {
+        match conn.query_drop(stmt) {
+            Ok(()) => out.push(AssertionResult {
+                kind: "mysql".into(),
+                passed: true,
+                message: format!("seeded: {}", stmt.chars().take(60).collect::<String>()),
+                expected: None,
+                actual: None,
+            }),
+            Err(e) => out.push(fail_mysql(format!("seed failed ({stmt}): {e}"))),
+        }
+    }
+}
+
+fn evaluate_mysql(m: &crate::spec::MySqlAssertion, port: u16) -> Vec<AssertionResult> {
+    use mysql::prelude::Queryable;
+    let mut out = Vec::new();
+    let Some(query) = &m.query else { return out };
+    let mut conn = match mysql_conn(port) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(fail_mysql(format!("could not connect to MySQL: {e}")));
+            return out;
+        }
+    };
+    let rows: Vec<mysql::Row> = match conn.query(query) {
+        Ok(r) => r,
+        Err(e) => {
+            out.push(fail_mysql(format!("query failed: {e}")));
+            return out;
+        }
+    };
+
+    if let Some(expected_count) = m.expect_row_count {
+        let passed = rows.len() as i64 == expected_count;
+        out.push(AssertionResult {
+            kind: "mysql".into(),
+            passed,
+            message: if passed {
+                format!("query returned {} row(s)", rows.len())
+            } else {
+                format!("expected {expected_count} row(s), got {}", rows.len())
+            },
+            expected: Some(Json::from(expected_count)),
+            actual: Some(Json::from(rows.len() as i64)),
+        });
+    }
+    if let Some(expect_row) = &m.expect_row {
+        let expected = yaml_to_json(expect_row);
+        match rows.first() {
+            Some(row) => {
+                let actual = mysql_row_to_json(row);
+                let passed = matches_subset(&expected, &actual);
+                out.push(AssertionResult {
+                    kind: "mysql".into(),
+                    passed,
+                    message: if passed {
+                        "first row matches expected fields".into()
+                    } else {
+                        "first row did not match expected fields".into()
+                    },
+                    expected: Some(expected),
+                    actual: Some(actual),
+                });
+            }
+            None => out.push(AssertionResult {
+                kind: "mysql".into(),
+                passed: false,
+                message: "expected a matching row, but query returned no rows".into(),
+                expected: Some(expected),
+                actual: Some(Json::Null),
+            }),
+        }
+    }
+    out
+}
+
+fn run_mysql_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+    let Some(m) = &check.mysql else { return };
+    if m.query.is_none() {
+        return;
+    }
+    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Mysql) else {
+        out.push(fail_mysql("mysql assertion but no MySQL service is running".into()));
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let mut last = evaluate_mysql(m, ep.host_port);
+    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+        sleep(Duration::from_millis(400));
+        last = evaluate_mysql(m, ep.host_port);
+    }
+    out.extend(last);
+}
+
+// ---------------------------------------------------------------------------
+// MongoDB  (seed -> [request] -> verify)
+// ---------------------------------------------------------------------------
+
+fn fail_mongo(message: String) -> AssertionResult {
+    AssertionResult { kind: "mongodb".into(), passed: false, message, expected: None, actual: None }
+}
+
+fn mongo_client(port: u16) -> mongodb::error::Result<mongodb::sync::Client> {
+    mongodb::sync::Client::with_uri_str(format!("mongodb://127.0.0.1:{port}"))
+}
+
+fn yaml_to_bson_doc(v: &serde_yaml::Value) -> anyhow::Result<mongodb::bson::Document> {
+    let json = yaml_to_json(v);
+    mongodb::bson::to_document(&json).map_err(|e| anyhow::anyhow!("expected a document: {e}"))
+}
+
+fn run_mongo_seed(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) {
+    use mongodb::bson::{Bson, Document};
+    let Some(m) = &check.mongodb else { return };
+    if m.seed.is_empty() {
+        return;
+    }
+    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Mongodb) else {
+        out.push(fail_mongo("mongodb seed but no MongoDB service is running".into()));
+        return;
+    };
+    let client = match mongo_client(ep.host_port) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(fail_mongo(format!("could not connect to MongoDB: {e}")));
+            return;
+        }
+    };
+    let coll = client.database(&m.database).collection::<Document>(&m.collection);
+
+    for op in &m.seed {
+        let result: anyhow::Result<String> = (|| {
+            if let Some(doc) = &op.insert {
+                coll.insert_one(yaml_to_bson_doc(doc)?, None)?;
+                Ok(format!("inserted into {}.{}", m.database, m.collection))
+            } else if let Some(up) = &op.update {
+                let mut update = Document::new();
+                update.insert("$set", Bson::Document(yaml_to_bson_doc(&up.set)?));
+                let r = coll.update_many(yaml_to_bson_doc(&up.filter)?, update, None)?;
+                Ok(format!("updated {} doc(s)", r.modified_count))
+            } else if let Some(del) = &op.delete {
+                let r = coll.delete_many(yaml_to_bson_doc(del)?, None)?;
+                Ok(format!("deleted {} doc(s)", r.deleted_count))
+            } else {
+                anyhow::bail!("operation has no insert/update/delete")
+            }
+        })();
+        match result {
+            Ok(msg) => out.push(AssertionResult {
+                kind: "mongodb".into(),
+                passed: true,
+                message: msg,
+                expected: None,
+                actual: None,
+            }),
+            Err(e) => out.push(fail_mongo(format!("seed op failed: {e}"))),
+        }
+    }
+}
+
+fn evaluate_mongo(m: &crate::spec::MongoAssertion, port: u16) -> Vec<AssertionResult> {
+    use mongodb::bson::Document;
+    let mut out = Vec::new();
+    let client = match mongo_client(port) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(fail_mongo(format!("could not connect to MongoDB: {e}")));
+            return out;
+        }
+    };
+    let coll = client.database(&m.database).collection::<Document>(&m.collection);
+    let filter = match m.find.as_ref().map(yaml_to_bson_doc).transpose() {
+        Ok(f) => f.unwrap_or_default(),
+        Err(e) => {
+            out.push(fail_mongo(format!("invalid find filter: {e}")));
+            return out;
+        }
+    };
+
+    if let Some(expect_count) = m.expect_count {
+        match coll.count_documents(filter.clone(), None) {
+            Ok(n) => out.push(AssertionResult {
+                kind: "mongodb".into(),
+                passed: n as i64 == expect_count,
+                message: if n as i64 == expect_count {
+                    format!("matched {n} document(s)")
+                } else {
+                    format!("expected {expect_count} document(s), got {n}")
+                },
+                expected: Some(Json::from(expect_count)),
+                actual: Some(Json::from(n as i64)),
+            }),
+            Err(e) => out.push(fail_mongo(format!("count failed: {e}"))),
+        }
+    }
+
+    if let Some(exp) = &m.expect_doc_contains {
+        let expected = yaml_to_json(exp);
+        match coll.find(filter, None) {
+            Ok(mut cursor) => match cursor.next() {
+                Some(Ok(doc)) => {
+                    let actual = serde_json::to_value(&doc).unwrap_or(Json::Null);
+                    let passed = matches_subset(&expected, &actual);
+                    out.push(AssertionResult {
+                        kind: "mongodb".into(),
+                        passed,
+                        message: if passed {
+                            "first document contains expected fields".into()
+                        } else {
+                            "first document did not contain expected fields".into()
+                        },
+                        expected: Some(expected),
+                        actual: Some(truncate_json(actual)),
+                    });
+                }
+                Some(Err(e)) => out.push(fail_mongo(format!("cursor error: {e}"))),
+                None => out.push(AssertionResult {
+                    kind: "mongodb".into(),
+                    passed: false,
+                    message: "expected a matching document, but the query returned none".into(),
+                    expected: Some(expected),
+                    actual: Some(Json::Null),
+                }),
+            },
+            Err(e) => out.push(fail_mongo(format!("find failed: {e}"))),
+        }
+    }
+    out
+}
+
+fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+    let Some(m) = &check.mongodb else { return };
+    if m.find.is_none() && m.expect_count.is_none() {
+        return;
+    }
+    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Mongodb) else {
+        out.push(fail_mongo("mongodb assertion but no MongoDB service is running".into()));
+        return;
+    };
+    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let mut last = evaluate_mongo(m, ep.host_port);
+    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+        sleep(Duration::from_millis(400));
+        last = evaluate_mongo(m, ep.host_port);
+    }
+    out.extend(last);
+}
+
 /// Run every selected check sequentially and collect results.
 pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
         let mut assertions = Vec::new();
         let mut error = None;
+
+        // SEED phase: write initial data BEFORE the request, so a feature that
+        // reads-then-updates has something to act on ("seed -> hit API -> check").
+        run_mysql_seed(check, ctx, &mut assertions);
+        run_mongo_seed(check, ctx, &mut assertions);
 
         if let Err(e) = run_http(check, ctx, &mut assertions) {
             error = Some(e.to_string());
@@ -969,6 +1317,8 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
                     .map(|k| k.produce.is_some())
                     .unwrap_or(false);
             run_db(check, ctx, async_effect, &mut assertions);
+            run_mysql_verify(check, ctx, async_effect, &mut assertions);
+            run_mongo_verify(check, ctx, async_effect, &mut assertions);
             run_redis(check, ctx, async_effect, &mut assertions);
             run_elastic(check, ctx, async_effect, &mut assertions);
             kafka_expect(check, ctx, &mut assertions);
@@ -1021,6 +1371,17 @@ mod tests {
         let exp = json!({"status": "PENDING"});
         let act = json!({"other": 1});
         assert!(!matches_subset(&exp, &act));
+    }
+
+    #[test]
+    fn parse_env_file_handles_comments_and_quotes() {
+        let content = "# c\nA=1\nB = two words \nC=\"quoted\"\nD='q2'\n\nBAD_LINE\n";
+        let m = parse_env_file(content);
+        assert_eq!(m.get("A").unwrap(), "1");
+        assert_eq!(m.get("B").unwrap(), "two words");
+        assert_eq!(m.get("C").unwrap(), "quoted");
+        assert_eq!(m.get("D").unwrap(), "q2");
+        assert!(!m.contains_key("BAD_LINE"));
     }
 
     #[test]

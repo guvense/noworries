@@ -163,8 +163,10 @@ check types: **[docs/checks.md](docs/checks.md)**.
 | Services       | Frameworks                        |
 | -------------- | --------------------------------- |
 | Postgres       | Spring Boot (auto-detected)       |
-| Kafka          | *(architecture is framework-agnostic —* |
-| Redis          | *adding Go etc. is one adapter)*  |
+| MySQL          | *(architecture is framework-agnostic —* |
+| MongoDB        | *adding Go etc. is one adapter)*  |
+| Kafka          |                                   |
+| Redis          |                                   |
 | Elasticsearch  | *(ES 7 & 8)*                      |
 
 Adding a new service or framework is a single trait implementation — see

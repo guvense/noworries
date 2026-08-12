@@ -2,6 +2,9 @@
 .noworries/
 *.log
 
+# local secrets for ${VAR} interpolation (tokens, passwords) — never commit
+.noworries.env
+
 # local session cruft (not part of the repo)
 _to_delete/
 _archive/
