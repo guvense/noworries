@@ -23,6 +23,9 @@ pub struct RunHandles {
     pub project_name: String,
     pub compose_file: String,
     pub endpoints: Vec<ServiceEndpoint>,
+    /// Resolved host ports for aux containers (e.g. the Flink JobManager REST
+    /// API), keyed by compose service name.
+    pub aux_ports: std::collections::BTreeMap<String, u16>,
 }
 
 fn base(file: &str, project: &str) -> Vec<String> {
@@ -118,11 +121,16 @@ pub fn up(compose: &GeneratedCompose, file: &str, health_timeout: Duration) -> R
         bail!("docker compose up failed (exit {code}). See output above.");
     }
 
-    let want: Vec<(String, bool)> = compose
+    let mut want: Vec<(String, bool)> = compose
         .services
         .iter()
         .map(|s| (s.name.clone(), s.has_healthcheck))
         .collect();
+    // Aux containers (Flink cluster) have no container healthcheck — wait for
+    // "running"; REST readiness is gated separately, host-side, before submit.
+    for a in &compose.aux {
+        want.push((a.name.clone(), false));
+    }
 
     let deadline = Instant::now() + health_timeout;
     loop {
@@ -195,10 +203,19 @@ pub fn up(compose: &GeneratedCompose, file: &str, health_timeout: Duration) -> R
         });
     }
 
+    let mut aux_ports = std::collections::BTreeMap::new();
+    for a in &compose.aux {
+        if let Some(cp) = a.resolve_port {
+            let hp = resolve_port(file, &project, &a.name, cp)?;
+            aux_ports.insert(a.name.clone(), hp);
+        }
+    }
+
     Ok(RunHandles {
         project_name: project,
         compose_file: file.to_string(),
         endpoints,
+        aux_ports,
     })
 }
 

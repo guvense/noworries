@@ -6,9 +6,10 @@ Assertions run in this order so that actions happen before observations:
 
 1. HTTP request (`request` + `expect`)
 2. Kafka `produce`
-3. DB assertion (`db`) — retries briefly for eventual consistency
-4. Redis assertion (`redis`) — retries briefly
-5. Kafka `expect_message`
+3. `scenario` — edge-case load/timing flood (burst / concurrent / duplicates / out_of_order)
+4. DB assertion (`db`) — retries for eventual consistency (window scales with a scenario's size)
+5. Redis assertion (`redis`) — retries briefly
+6. Kafka `expect_message`
 
 ## HTTP
 
@@ -43,9 +44,11 @@ Assertions run in this order so that actions happen before observations:
 - `expect_row_count` — exact number of rows returned.
 - Scalars compare loosely (a YAML number matches a text column of the same
   value), so you don't have to fight type coercion.
-- DB assertions **retry for a few seconds** when the check also has an async
-  trigger (an HTTP request or a Kafka produce), so a consumer/handler has time
-  to write.
+- DB assertions **retry for eventual consistency** when the check also has an
+  async trigger (an HTTP request, a Kafka produce, or a `scenario` flood), so a
+  consumer/handler has time to write. The retry window is ~6s normally and grows
+  with a scenario's message count (capped at 120s) so big floods have time to
+  drain.
 
 ## Kafka
 
@@ -75,6 +78,118 @@ added, and verify the effect with a DB/Redis assertion in the same check. Use
 - `produce.message` is serialized to JSON (a plain string is sent as-is).
 - `expect_message.contains` is matched (deep subset) against each message on the
   topic until one matches or `timeout_ms` elapses.
+
+## Edge-case scenarios
+
+A single trigger→observe check proves the **happy path**. A data pipeline (Flink,
+a Kafka consumer, any read-then-write flow) can pass that and still be wrong under
+load: it may drop messages in a burst, corrupt state under concurrent writes to
+the same key, double-process duplicates, or mishandle out-of-order arrival. A
+check's `scenario:` block replaces the single `kafka.produce` with a **generated
+flood** designed to expose exactly those bugs. Verification stays ordinary: the
+check's `db` / `mysql` / `mongodb` / `elastic` assertions (usually an exact
+**count**) prove the invariant held under load.
+
+```yaml
+- name: "burst of 500 orders: nothing dropped"
+  scenario:
+    kind: burst            # burst | concurrent | duplicates | out_of_order
+    count: 500             # logical messages (per-kind default if omitted)
+    concurrency: 8         # parallel producer threads (the source of races)
+    keys: 500              # distinct keys the load spreads over
+    rate_per_sec: 2000     # optional per-producer cap (0/absent = as fast as possible)
+    kafka:
+      topic: orders-in
+      key: "ord-${seq}"                       # template
+      message: { id: "${uuid}", amount: "${seq}" }
+  db:
+    query: "SELECT count(*) AS n FROM orders"
+    expect_row: { n: 500 }                    # exactly-once, no loss
+```
+
+### The four kinds
+
+| `kind`         | Behaviour | Bug it exposes | Typical verification |
+| -------------- | --------- | -------------- | -------------------- |
+| `burst`        | Floods `count` messages (optionally rate-limited) over `keys` keys; one producer by default. | Dropped messages, can't keep up. | count `= count`. |
+| `concurrent`   | `count` writes over a few `keys` across `concurrency` parallel producers → real races; `${i}` is the per-key version. | Lost updates, duplicate rows, stale final value. | one row per key (`= keys`) and/or final value `= max(${i})`. |
+| `duplicates`   | Sends every message **twice** (same key + payload, back-to-back). | Non-idempotent / double-processing. | count `= count` (not `2·count`). |
+| `out_of_order` | For each key, emits events in **reverse** arrival order; the true order rides in `${i}`. | Naive last-arrival-wins, bad windowing. | final value `= max(${i})` per key. |
+
+### Knobs
+
+| Field         | Default (per kind) | Meaning |
+| ------------- | ------------------ | ------- |
+| `kind`        | —                  | Which strategy: `burst`, `concurrent`, `duplicates`, `out_of_order`. |
+| `count`       | burst 100; others 50 | Number of logical messages. |
+| `concurrency` | burst/dupes/oo 1; concurrent 4 (min 2) | Parallel producer threads. Higher = more contention. |
+| `keys`        | burst = `count`; concurrent/oo 1 | Distinct keys the load spreads over. Fewer keys + more concurrency = more contention on one key. |
+| `rate_per_sec`| unbounded          | Optional cap on messages/second **per producer**. |
+| `kafka.topic` | —                  | Target topic (required). |
+| `kafka.key`   | `k<n>` per strategy | Key template. |
+| `kafka.message` | —                | Message template (required), serialized to JSON. |
+
+### Template placeholders
+
+Available in `kafka.key` and any string leaf of `kafka.message`:
+
+- `${seq}` — global 0-based index across the whole flood.
+- `${i}` — per-key sequence (a version number for that key).
+- `${key}` — the assigned key value.
+- `${uuid}` — a plan-unique token (handy for a distinct id field).
+
+### Verifying each kind
+
+```yaml
+# concurrent: many writers hammer ONE key — the app must end consistent.
+- name: "concurrent updates to a hot key stay consistent"
+  scenario:
+    kind: concurrent
+    count: 50
+    keys: 1
+    concurrency: 6
+    kafka: { topic: orders-in, key: "hot", message: { id: "hot", version: "${i}" } }
+  db:
+    query: "SELECT count(*) AS n FROM orders WHERE id = 'hot'"
+    expect_row: { n: 1 }              # one row, not 50 (no duplicate inserts under race)
+
+# duplicates: idempotency — half the messages are exact repeats.
+- name: "duplicate delivery is idempotent"
+  scenario:
+    kind: duplicates
+    count: 100
+    kafka: { topic: orders-in, key: "dup-${seq}", message: { id: "dup-${seq}" } }
+  db:
+    query: "SELECT count(*) AS n FROM orders WHERE id LIKE 'dup-%'"
+    expect_row: { n: 100 }            # 100, not 200
+
+# out_of_order: newest event arrives first; app must end on the newest by ${i}.
+- name: "out-of-order events converge on the latest"
+  scenario:
+    kind: out_of_order
+    count: 20
+    keys: 1
+    kafka: { topic: prices-in, key: "P1", message: { id: "P1", version: "${i}" } }
+  db:
+    query: "SELECT version FROM prices WHERE id = 'P1'"
+    expect_row: { version: 19 }       # highest ${i}, despite reverse arrival
+```
+
+### How it runs
+
+- Scenarios run in the **trigger** phase (after `request` / `kafka.produce`,
+  before the observe assertions), so "flood → observe the effect" works.
+- Concurrency is real: the runner spawns `concurrency` threads, each with its own
+  Kafka producer, and dispatches messages round-robin — so writes genuinely race.
+- Because a flood takes time to drain, the observe assertions' retry window
+  **grows with `count`** (≈ 6s + count/50, capped at 120s). For very large bursts,
+  also raise the overall `--timeout`.
+- A scenario declared without a Kafka service, or with an unknown `kind`, fails
+  the check with a clear message (it never silently passes).
+
+Scenarios currently target **Kafka**. The layer is an extensible strategy (the
+`EdgeCase` trait in `src/edgecases/`), so new kinds and sinks can be added without
+changing the check schema — see [architecture](architecture.md#edgecase-srcedgecases).
 
 ## Redis
 

@@ -64,6 +64,7 @@ services:
             host_port: None,
             body: serde_yaml::Value::Null,
         }],
+        aux: vec![],
     };
 
     let handles = up(&compose, &file_str, Duration::from_secs(60))

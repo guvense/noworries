@@ -6,13 +6,25 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
+use crate::flink;
 use crate::services::{provider_for, ComposeService};
-use crate::spec::ServiceDecl;
+use crate::spec::{FlinkSpec, ServiceDecl};
 
 pub struct GeneratedCompose {
     pub project_name: String,
     pub yaml: String,
     pub services: Vec<ComposeService>,
+    /// Non-service containers (currently the Flink cluster) that lifecycle must
+    /// still wait for and, when `resolve_port` is set, resolve a host port for.
+    pub aux: Vec<AuxContainer>,
+}
+
+/// A generated container that isn't one of the declared [`ServiceKind`] services
+/// but still participates in the run (health-wait and optional port resolution).
+pub struct AuxContainer {
+    pub name: String,
+    /// Container port to resolve a host mapping for, if any.
+    pub resolve_port: Option<u16>,
 }
 
 #[derive(Serialize)]
@@ -33,7 +45,11 @@ struct ComposeDoc {
     services: BTreeMap<String, serde_yaml::Value>,
 }
 
-pub fn generate(decls: &[ServiceDecl], run_id: &str) -> Result<GeneratedCompose> {
+pub fn generate(
+    decls: &[ServiceDecl],
+    flink_spec: Option<&FlinkSpec>,
+    run_id: &str,
+) -> Result<GeneratedCompose> {
     let project = format!("noworries-{run_id}");
     let net = format!("{project}_net");
 
@@ -59,6 +75,19 @@ pub fn generate(decls: &[ServiceDecl], run_id: &str) -> Result<GeneratedCompose>
         services.push(svc);
     }
 
+    // Flink session cluster (jobmanager + taskmanager), if this run tests a job.
+    let mut aux = Vec::new();
+    if let Some(fs) = flink_spec {
+        let kinds: Vec<_> = decls.iter().map(|d| d.kind).collect();
+        for c in flink::cluster_services(fs, &kinds)? {
+            map.insert(c.name.clone(), c.body);
+            aux.push(AuxContainer {
+                name: c.name,
+                resolve_port: c.resolve_port,
+            });
+        }
+    }
+
     let doc = ComposeDoc {
         name: project.clone(),
         networks: Networks {
@@ -81,5 +110,6 @@ pub fn generate(decls: &[ServiceDecl], run_id: &str) -> Result<GeneratedCompose>
         project_name: project,
         yaml,
         services,
+        aux,
     })
 }

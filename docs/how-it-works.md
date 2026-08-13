@@ -33,18 +33,43 @@ ephemeral and isolated.
 ### Environment wiring
 
 The app is started as a subprocess (its own process group) with env vars mapping
-the resolved container ports. For Spring Boot:
+the resolved container ports. Each framework adapter translates the endpoints
+into the variables its ecosystem expects.
+
+For **Spring Boot** (a subset):
 
 | Service  | Variables set |
 | -------- | ------------- |
 | Postgres | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` |
+| MySQL    | `SPRING_DATASOURCE_URL` (jdbc:mysql), `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` |
+| MongoDB  | `SPRING_DATA_MONGODB_URI` |
 | Kafka    | `SPRING_KAFKA_BOOTSTRAP_SERVERS` |
 | Redis    | `SPRING_DATA_REDIS_HOST`, `SPRING_DATA_REDIS_PORT` |
-| (all)    | `NOWORRIES_<SERVICE>_HOST`, `NOWORRIES_<SERVICE>_PORT` (framework-agnostic) |
-| (app)    | `SERVER_PORT` (or `app.port_env`) = a free port chosen for the app |
+| Elastic  | `SPRING_ELASTICSEARCH_URIS` |
 
-Baked-in Postgres credentials are `noworries` / `noworries` / `noworries`
-(user / password / db).
+For **Go / FastAPI / Node.js**, noworries exports the conventional connection
+strings these ecosystems read (apps pick whichever their client expects):
+
+| Service  | Variables set |
+| -------- | ------------- |
+| Postgres | `DATABASE_URL` (postgres://), `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` |
+| MySQL    | `DATABASE_URL` (mysql://), `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` |
+| MongoDB  | `MONGODB_URI`, `MONGO_URL` |
+| Redis    | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT` |
+| Kafka    | `KAFKA_BROKERS`, `KAFKA_BOOTSTRAP_SERVERS` |
+| Elastic  | `ELASTICSEARCH_URL`, `ELASTIC_URL` |
+
+Regardless of framework:
+
+| Service  | Variables set |
+| -------- | ------------- |
+| (all)    | `NOWORRIES_<SERVICE>_HOST`, `NOWORRIES_<SERVICE>_PORT` (framework-agnostic) |
+| (app)    | the port env (`SERVER_PORT` for Spring, `PORT` for Go/FastAPI/Node, or `app.port_env`) = a free port chosen for the app |
+
+Baked-in Postgres/MySQL credentials are `noworries` / `noworries` / `noworries`
+(user / password / db). If both Postgres and MySQL are declared, `DATABASE_URL`
+resolves to the last one wired — pick per-part vars (`PGHOST` vs `MYSQL_HOST`) to
+disambiguate.
 
 The runner then waits for the app's health endpoint and executes the selected
 checks — see [checks](checks.md).

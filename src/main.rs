@@ -13,7 +13,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use noworries::spec::{NoworriesSpec, SPEC_FILENAME};
-use noworries::{app, compose, framework, git, lifecycle, report, runner};
+use noworries::{app, compose, flink, framework, git, lifecycle, report, runner};
 
 const OUT_DIR: &str = ".noworries";
 const OUT_FILE: &str = "compose.test.yml";
@@ -124,6 +124,80 @@ fn load_env_file(dir: &str) -> BTreeMap<String, String> {
         report::info(&format!("loaded {} variable(s) from {ENV_FILE}", m.len()));
     }
     m
+}
+
+/// Extract `${VAR}` names referenced in a text blob.
+fn extract_var_refs(text: &str) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("${") {
+        let after = &rest[i + 2..];
+        if let Some(j) = after.find('}') {
+            let name = after[..j].trim();
+            if !name.is_empty() {
+                set.insert(name.to_string());
+            }
+            rest = &after[j + 1..];
+        } else {
+            break;
+        }
+    }
+    set
+}
+
+fn append_env_file(dir: &str, key: &str, value: &str) {
+    let path = Path::new(dir).join(ENV_FILE);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{key}={value}");
+    }
+}
+
+/// Interactively prompt for any `${VAR}` referenced in `noworries.yml` that
+/// isn't resolvable yet, saving answers to `.noworries.env`. No-op when stdin
+/// isn't a TTY (e.g. CI) — there, an unset var just warns at use time.
+fn prompt_missing_env(dir: &str, spec_path: &Path) {
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    let Ok(spec_text) = std::fs::read_to_string(spec_path) else {
+        return;
+    };
+    let refs = extract_var_refs(&spec_text);
+    if refs.is_empty() {
+        return;
+    }
+    let file_env = {
+        let p = Path::new(dir).join(ENV_FILE);
+        std::fs::read_to_string(&p)
+            .map(|c| runner::parse_env_file(&c))
+            .unwrap_or_default()
+    };
+    let missing: Vec<String> = refs
+        .into_iter()
+        .filter(|v| !file_env.contains_key(v.as_str()) && std::env::var(v).is_err())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    report::info("");
+    report::info(&format!(
+        "noworries.yml references {} variable(s) not set yet: {}",
+        missing.len(),
+        missing.join(", ")
+    ));
+    report::info(&format!("Enter values (saved to {ENV_FILE}; leave blank to skip):"));
+    for var in missing {
+        print!("  {var}=");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            continue;
+        }
+        let val = line.trim();
+        if !val.is_empty() {
+            append_env_file(dir, &var, val);
+        }
+    }
 }
 
 fn short_run_id() -> String {
@@ -255,10 +329,14 @@ fn cmd_run(cli: &Cli) -> Result<i32> {
         return Ok(2);
     }
 
+    // Ask for any ${VAR} the spec references but that isn't set yet (interactive
+    // only), and save answers to .noworries.env so they persist and stay out of git.
+    prompt_missing_env(&dir, &spec_path);
+
     lifecycle::preflight()?;
 
     let run_id = short_run_id();
-    let compose = compose::generate(&spec.services, &run_id)?;
+    let compose = compose::generate(&spec.services, spec.flink.as_ref(), &run_id)?;
 
     let out_dir = Path::new(&dir).join(OUT_DIR);
     std::fs::create_dir_all(&out_dir)?;
@@ -331,6 +409,35 @@ fn run_checks_flow(
     // Apply Elasticsearch index templates while the infra is up but BEFORE the
     // app starts, so app-created indices get the right mapping.
     runner::apply_elastic_templates(selected, &handles.endpoints);
+
+    // Stand up the Flink pipeline (build + submit jobs) if this run tests one.
+    // Jobs must be RUNNING before checks trigger the pipeline.
+    if let Some(fs) = &spec.flink {
+        match handles.aux_ports.get(flink::JOBMANAGER) {
+            Some(&rest_port) => {
+                report::info("");
+                report::info(&format!(
+                    "Submitting {} Flink job(s) (JobManager REST http://127.0.0.1:{rest_port})…",
+                    fs.jobs.len()
+                ));
+                match flink::submit_all(Path::new(dir), rest_port, fs) {
+                    Ok(jobs) => {
+                        for j in &jobs {
+                            report::ok(&format!("job running: {} ({})", j.name, j.job_id));
+                        }
+                    }
+                    Err(e) => {
+                        report::error_line(&format!("Flink job submission failed: {e}"));
+                        return 1;
+                    }
+                }
+            }
+            None => {
+                report::error_line("internal error: Flink JobManager REST port was not resolved");
+                return 1;
+            }
+        }
+    }
 
     let needs_app = selected.iter().any(|c| c.request.is_some())
         || spec.app.as_ref().and_then(|a| a.start.as_ref()).is_some()

@@ -121,6 +121,55 @@ pub struct AppSpec {
     pub env: BTreeMap<String, String>,
 }
 
+/// A Flink pipeline under test: an ephemeral session cluster
+/// (jobmanager + taskmanager) onto which one or more jobs are built and
+/// submitted over the REST API before the checks run. Use this **instead of**
+/// `app` when the thing under test is a Flink job rather than an HTTP server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlinkSpec {
+    /// Flink image (default `flink:1.19`).
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Number of TaskManager replicas (default 1).
+    #[serde(default)]
+    pub taskmanagers: Option<u32>,
+    /// Task slots per TaskManager (default 2).
+    #[serde(default)]
+    pub slots: Option<u32>,
+    /// Seconds to wait for the JobManager REST API and for each job to reach
+    /// RUNNING (default 120).
+    #[serde(default, rename = "submit_timeout")]
+    pub submit_timeout: Option<u64>,
+    /// Jobs to build + submit, in order.
+    pub jobs: Vec<FlinkJob>,
+}
+
+/// One Flink job: optionally built, then uploaded and run on the cluster.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlinkJob {
+    /// Optional label for reporting.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional shell command run (in the project dir) to build the jar before
+    /// submission, e.g. `mvn -q -DskipTests package`.
+    #[serde(default)]
+    pub build: Option<String>,
+    /// Path to the job jar (relative to the project dir), e.g.
+    /// `target/pipeline-0.1.jar`.
+    pub jar: String,
+    /// Optional fully-qualified entry-point class (`--class`).
+    #[serde(default, rename = "entry_class")]
+    pub entry_class: Option<String>,
+    /// Optional program arguments passed to the job.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Optional job parallelism.
+    #[serde(default)]
+    pub parallelism: Option<u32>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpRequestSpec {
@@ -179,6 +228,48 @@ pub struct KafkaExpect {
     pub contains: serde_yaml::Value,
     #[serde(default, rename = "timeout_ms")]
     pub timeout_ms: Option<u64>,
+}
+
+/// A non-happy-path load/timing scenario for the **trigger** phase of a check.
+/// Instead of a single produce, it generates many messages in a shape designed
+/// to stress a real behaviour — burst throughput, concurrent races, duplicate
+/// delivery, out-of-order arrival — so data pipelines (Flink and friends) get
+/// tested for correctness under load, not just the happy path. Verification uses
+/// the check's ordinary observe assertions (`db`/`mysql`/`mongodb`/`elastic`
+/// `expect_*count*`, etc.). Extensible: `kind` resolves to an edge-case strategy,
+/// and new kinds are added without touching this struct.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioSpec {
+    /// `burst` | `concurrent` | `duplicates` | `out_of_order`.
+    pub kind: String,
+    /// Kafka load target (the only sink for now; HTTP/other come later).
+    pub kafka: ScenarioKafka,
+    /// Total number of distinct logical messages (default per-kind, e.g. 100).
+    #[serde(default)]
+    pub count: Option<u32>,
+    /// Parallel producer threads — the source of real races (default per-kind).
+    #[serde(default)]
+    pub concurrency: Option<u32>,
+    /// Number of distinct keys the load spreads over (default per-kind). Fewer
+    /// keys + higher concurrency = more contention on the same key.
+    #[serde(default)]
+    pub keys: Option<u32>,
+    /// Optional cap on messages/second per producer (0/absent = as fast as able).
+    #[serde(default, rename = "rate_per_sec")]
+    pub rate_per_sec: Option<u32>,
+}
+
+/// The Kafka target + message template for a [`ScenarioSpec`]. The `key` and
+/// `message` templates may reference `${seq}` (global 0-based index), `${i}`
+/// (per-key sequence), `${key}` (assigned key value), and `${uuid}` (unique id).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScenarioKafka {
+    pub topic: String,
+    #[serde(default)]
+    pub key: Option<String>,
+    pub message: serde_yaml::Value,
 }
 
 /// Redis assertion: check a key exists and/or its (possibly JSON) value matches.
@@ -415,6 +506,9 @@ pub struct CheckSpec {
     pub mysql: Option<MySqlAssertion>,
     #[serde(default)]
     pub mongodb: Option<MongoAssertion>,
+    /// Optional edge-case load/timing scenario driving the trigger phase.
+    #[serde(default)]
+    pub scenario: Option<ScenarioSpec>,
 }
 
 /// Raw shape as it appears on disk (services are strings here).
@@ -425,6 +519,8 @@ struct RawSpec {
     services: Vec<String>,
     #[serde(default)]
     app: Option<AppSpec>,
+    #[serde(default)]
+    flink: Option<FlinkSpec>,
     #[serde(default)]
     auth: Option<AuthSpec>,
     #[serde(default)]
@@ -437,6 +533,7 @@ pub struct NoworriesSpec {
     pub version: u32,
     pub services: Vec<ServiceDecl>,
     pub app: Option<AppSpec>,
+    pub flink: Option<FlinkSpec>,
     pub auth: Option<AuthSpec>,
     pub checks: Vec<CheckSpec>,
 }
@@ -461,10 +558,21 @@ impl NoworriesSpec {
                 bail!("{SPEC_FILENAME}: every check needs a non-empty \"name\".");
             }
         }
+        if let Some(f) = &raw.flink {
+            if f.jobs.is_empty() {
+                bail!("{SPEC_FILENAME}: \"flink.jobs\" must list at least one job.");
+            }
+            for j in &f.jobs {
+                if j.jar.trim().is_empty() {
+                    bail!("{SPEC_FILENAME}: every flink job needs a non-empty \"jar\" path.");
+                }
+            }
+        }
         Ok(NoworriesSpec {
             version: 1,
             services,
             app: raw.app,
+            flink: raw.flink,
             auth: raw.auth,
             checks: raw.checks,
         })
@@ -585,5 +693,73 @@ checks:
         assert!(e.operations[0].insert.is_some());
         assert!(e.operations[1].update.is_some());
         assert!(e.operations[2].delete.is_some());
+    }
+
+    #[test]
+    fn flink_block_parses_jobs() {
+        let yaml = r#"
+version: 1
+services: [kafka, postgres, elastic]
+flink:
+  image: "flink:1.19"
+  taskmanagers: 2
+  slots: 4
+  jobs:
+    - name: "enrich"
+      build: "mvn -q -DskipTests package"
+      jar: "target/enrich-0.1.jar"
+      entry_class: "com.acme.Enrich"
+      args: ["--source", "events-in"]
+      parallelism: 2
+    - jar: "target/index-0.1.jar"
+checks:
+  - name: "event flows through"
+    kafka: { produce: { topic: "events-in", key: "E1", message: { id: "E1" } } }
+"#;
+        let spec = NoworriesSpec::parse(yaml).unwrap();
+        let f = spec.flink.as_ref().unwrap();
+        assert_eq!(f.image.as_deref(), Some("flink:1.19"));
+        assert_eq!(f.taskmanagers, Some(2));
+        assert_eq!(f.slots, Some(4));
+        assert_eq!(f.jobs.len(), 2);
+        assert_eq!(f.jobs[0].name.as_deref(), Some("enrich"));
+        assert_eq!(f.jobs[0].entry_class.as_deref(), Some("com.acme.Enrich"));
+        assert_eq!(f.jobs[0].args, vec!["--source", "events-in"]);
+        assert_eq!(f.jobs[0].parallelism, Some(2));
+        assert_eq!(f.jobs[1].jar, "target/index-0.1.jar");
+    }
+
+    #[test]
+    fn flink_requires_at_least_one_job() {
+        let yaml = "version: 1\nservices: [kafka]\nflink:\n  jobs: []\n";
+        assert!(NoworriesSpec::parse(yaml).is_err());
+    }
+
+    #[test]
+    fn scenario_block_parses_on_a_check() {
+        let yaml = r#"
+version: 1
+services: [kafka, postgres]
+checks:
+  - name: "burst of 500 orders all persist"
+    scenario:
+      kind: burst
+      count: 500
+      concurrency: 8
+      rate_per_sec: 2000
+      kafka:
+        topic: orders-in
+        key: "order-${seq}"
+        message: { id: "${uuid}", version: "${i}" }
+    db: { query: "SELECT count(*) n FROM orders", expect_row: { n: 500 } }
+"#;
+        let spec = NoworriesSpec::parse(yaml).unwrap();
+        let sc = spec.checks[0].scenario.as_ref().unwrap();
+        assert_eq!(sc.kind, "burst");
+        assert_eq!(sc.count, Some(500));
+        assert_eq!(sc.concurrency, Some(8));
+        assert_eq!(sc.rate_per_sec, Some(2000));
+        assert_eq!(sc.kafka.topic, "orders-in");
+        assert_eq!(sc.kafka.key.as_deref(), Some("order-${seq}"));
     }
 }

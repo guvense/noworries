@@ -56,20 +56,94 @@ official image) and `elastic`/`elasticsearch` expand to the official
 ## `app` (optional)
 
 How to launch the app under test. Omit it entirely and `noworries` auto-detects
-the framework (currently Spring Boot via `mvnw`/`gradlew`/`pom.xml`/
-`build.gradle`).
+the framework from the files in your project root:
+
+| Framework      | Adapter name  | Detected by | Default start | Health | Port env |
+| -------------- | ------------- | ----------- | ------------- | ------ | -------- |
+| Spring Boot    | `spring-boot` | `pom.xml` / `build.gradle(.kts)` / `mvnw` / `gradlew` | `./mvnw spring-boot:run` (or `gradle`/`mvn` equivalent) | `/actuator/health` | `SERVER_PORT` |
+| Go             | `go`          | `go.mod` | `go run .` | TCP (`none`) | `PORT` |
+| FastAPI (Python) | `fastapi`   | `main.py` / `app.py`, or a `pyproject.toml`/`requirements.txt` mentioning fastapi/uvicorn | `uvicorn main:app --host 0.0.0.0 --port ${PORT}` | TCP (`none`) | `PORT` |
+| Node.js        | `node`        | `package.json` | `npm start` (or `node server.js`/`index.js`/`app.js`) | TCP (`none`) | `PORT` |
+
+Detection runs in that order, so a Spring Boot project that also ships a
+`package.json` (e.g. a JS frontend) still resolves to `spring-boot`. Set
+`app.framework` to force one explicitly.
 
 | Field           | Default                              | Meaning |
 | --------------- | ------------------------------------ | ------- |
 | `start`         | auto-detected from the framework     | Shell command to start the app. |
-| `health`        | framework default (`/actuator/health`) | Path polled until it returns 2xx before checks run. Set to `none` to skip HTTP and just wait for the port to accept TCP. |
-| `framework`     | auto-detect                          | Force a specific framework adapter by name (e.g. `spring-boot`). |
-| `port_env`      | `SERVER_PORT`                        | Env var the app reads for its HTTP port. |
+| `health`        | framework default (`/actuator/health` for Spring; `none` for Go/FastAPI/Node) | Path polled until it returns 2xx before checks run. Set to `none` to skip HTTP and just wait for the port to accept TCP. |
+| `framework`     | auto-detect                          | Force a specific framework adapter by name (`spring-boot`, `go`, `fastapi`, `node`). |
+| `port_env`      | framework default (`SERVER_PORT` for Spring; `PORT` for Go/FastAPI/Node) | Env var the app reads for its HTTP port. |
 | `ready_timeout` | `120`                                | Seconds to wait for the app to become ready. |
 | `env`           | none                                 | Extra environment variables passed to the app process. |
 
 The app is started with environment variables wired to the resolved container
 ports — see [how it works](how-it-works.md#environment-wiring).
+
+## `flink` (optional)
+
+Use `flink` **instead of `app`** when the thing under test is an Apache Flink
+job rather than an HTTP server. noworries stands up an ephemeral Flink **session
+cluster** (one JobManager + one TaskManager) on the same isolated network as your
+declared `services`, builds and submits your job(s) over the JobManager REST API,
+waits until each reaches `RUNNING`, then runs the `checks`. The whole cluster is
+destroyed by teardown, so jobs need no explicit cancellation.
+
+```yaml
+version: 1
+services: [kafka, postgres, elastic]
+
+flink:
+  image: flink:1.19        # optional (default flink:1.19)
+  taskmanagers: 1          # optional replica count (default 1)
+  slots: 2                 # optional task slots per TaskManager (default 2)
+  submit_timeout: 120      # optional seconds to wait for REST + each job RUNNING
+  jobs:
+    - name: "enrich"                       # optional label
+      build: "mvn -q -DskipTests package"  # optional; runs in the project dir first
+      jar: target/pipeline-0.1.jar         # path to the job jar (required)
+      entry_class: com.acme.Pipeline       # optional (--class)
+      args: ["--source", "events-in"]      # optional program args
+      parallelism: 2                        # optional
+
+checks:
+  # Trigger the pipeline, then observe each hop with the normal retry loop:
+  - name: "event flows kafka -> postgres -> topic -> ES"
+    kafka: { produce: { topic: "events-in", key: "E1", message: { id: "E1", amount: 10 } } }
+    db:    { query: "SELECT status FROM processed WHERE id='E1'", expect_row: { status: "OK" } }
+  - name: "enriched event indexed"
+    kafka:   { expect_message: { topic: "events-enriched", contains: { id: "E1" }, timeout_ms: 15000 } }
+    elastic: { index: "events", doc_id: "E1", expect_source_contains: { id: "E1" } }
+```
+
+| Field           | Default      | Meaning |
+| --------------- | ------------ | ------- |
+| `image`         | `flink:1.19` | Flink image for the cluster. |
+| `taskmanagers`  | `1`          | Number of TaskManager replicas. |
+| `slots`         | `2`          | Task slots per TaskManager (caps job parallelism). |
+| `submit_timeout`| `120`        | Seconds to wait for the REST API and for each job to reach `RUNNING`. |
+| `jobs`          | —            | Non-empty, ordered list of jobs to build + submit. |
+
+Each job: `jar` (required, relative to the project dir), optional `build` (shell
+command run before submission), `entry_class`, `args`, `parallelism`, `name`.
+
+**Networking.** The job runs *inside* the cluster, so it must reach the declared
+services by their **in-network** names and container ports, not the random host
+ports the host-side app model uses:
+
+| Service | In-network address | Also exported to the job as |
+| ------- | ------------------ | --------------------------- |
+| kafka   | `kafka:9092`       | `NOWORRIES_KAFKA_HOST`/`_PORT` |
+| postgres| `postgres:5432`    | `NOWORRIES_POSTGRES_HOST`/`_PORT` |
+| mysql   | `mysql:3306`       | `NOWORRIES_MYSQL_HOST`/`_PORT` |
+| mongodb | `mongodb:27017`    | `NOWORRIES_MONGODB_HOST`/`_PORT` |
+| redis   | `redis:6379`       | `NOWORRIES_REDIS_HOST`/`_PORT` |
+| elastic | `elastic:9200`     | `NOWORRIES_ELASTIC_HOST`/`_PORT` |
+
+Configure your job to read those hostnames (either hard-coded, or from the
+injected `NOWORRIES_*` env vars). First run is slow — the `flink` image (~600MB)
+plus your services pull; use `--timeout 600`.
 
 ## `auth` (optional)
 
@@ -127,7 +201,11 @@ TEST_PASS=s3cret
 API_TOKEN=eyJhbGciOi...
 ```
 
-An unset variable is left literal and a warning is printed.
+If you run `noworries` **interactively** and the spec references a `${VAR}` that
+isn't set anywhere yet, it prompts you for the value and appends it to
+`.noworries.env` (so it persists and stays out of git). In non-interactive runs
+(CI, piped stdin) it doesn't prompt — an unset variable is left literal and a
+warning is printed.
 
 ## `checks`
 
@@ -147,6 +225,46 @@ examples in [checks](checks.md). Shape:
 | `elastic` | Elasticsearch: `index`, optional `template`, `operations` (insert/update/delete), and `doc_id`/`expect_source_contains` or `query`/`expect_hits`. |
 | `mysql`   | MySQL: `seed` SQL (run before the request), `query` + `expect_row`/`expect_row_count`. |
 | `mongodb` | MongoDB: `database`, `collection`, `seed` (insert/update/delete), `find` + `expect_doc_contains`/`expect_count`. |
+| `scenario`| Edge-case load/timing trigger (burst / concurrent / duplicates / out_of_order) — see below. |
+
+### Edge-case scenarios
+
+A single trigger→observe check proves the happy path. A **data pipeline** (Flink,
+a Kafka consumer, any read-then-write flow) can pass that and still drop messages
+under load, corrupt state under concurrent writes, double-process duplicates, or
+mishandle out-of-order arrival. A check's `scenario:` block replaces the single
+`kafka.produce` with a generated flood designed to expose exactly those bugs; the
+check's ordinary observe assertions (usually an exact **count**) verify the
+invariant.
+
+```yaml
+checks:
+  - name: "burst of 500 orders: nothing dropped"
+    scenario:
+      kind: burst            # burst | concurrent | duplicates | out_of_order
+      count: 500             # logical messages (default per-kind)
+      concurrency: 8         # parallel producer threads (the source of races)
+      keys: 500              # distinct keys the load spreads over
+      rate_per_sec: 2000     # optional per-producer cap (0/absent = as fast as possible)
+      kafka:
+        topic: orders-in
+        key: "ord-${seq}"                     # template
+        message: { id: "${uuid}", amount: "${seq}" }
+    db: { query: "SELECT count(*) n FROM orders", expect_row: { n: 500 } }
+```
+
+| `kind`         | Behaviour | Catches | Typical verification |
+| -------------- | --------- | ------- | -------------------- |
+| `burst`        | Floods `count` messages (optionally rate-limited) over `keys` keys. | Dropped messages, can't keep up. | `expect_row_count`/`n = count`. |
+| `concurrent`   | `count` writes over a few `keys` across `concurrency` parallel producers → real races; `${i}` is the per-key version. | Lost updates, duplicate rows, stale final value. | one row per key + final value = highest `${i}`. |
+| `duplicates`   | Sends every message **twice**. | Non-idempotent / double-processing. | `n = count` (not `2·count`). |
+| `out_of_order` | Emits each key's events in **reverse** arrival order; true order rides in `${i}`. | Naive last-arrival-wins, bad windowing. | final value = highest `${i}`. |
+
+Template placeholders (in `key` and `message`): `${seq}` (global 0-based index),
+`${i}` (per-key sequence / version), `${key}` (assigned key), `${uuid}` (unique
+id). Scenarios currently target Kafka — the layer is an extensible strategy
+(`EdgeCase`) so more sinks and kinds can be added without changing the spec. Big
+bursts take longer to drain, so raise `--timeout` accordingly.
 
 ### Tagging & scope
 

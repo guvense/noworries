@@ -6,8 +6,9 @@ allowed-tools: Bash(noworries:*), Bash(cargo:*), Bash(git:*), Bash(docker:*), Re
 
 # /noworries
 
-> **Requires `noworries` >= 0.2.0** (`noworries --version`). Older builds lack
-> some services/fields below and have the Kafka consumer offset-storage bug.
+> **Requires `noworries` >= 0.3.0** (`noworries --version`). Older builds lack
+> the Go/FastAPI/Node frameworks and the `flink` block below; builds < 0.2.0 also
+> have the Kafka consumer offset-storage bug.
 
 After code has been written, verify it actually works: stand up its
 infrastructure in ephemeral Docker containers, start the app against them, run
@@ -29,7 +30,9 @@ Exit code: `0` READY, `1` NOT READY/error, `2` not confirmed.
 
 1. **See what changed** (`noworries changed` / `git diff`). Identify observable
    behaviour: HTTP endpoints/status/body, DB writes, Kafka consumers/producers,
-   Redis caching, Elasticsearch indexing, MySQL/Mongo reads-then-writes.
+   Redis caching, Elasticsearch indexing, MySQL/Mongo reads-then-writes. For
+   **data pipelines / streaming / concurrent writes**, also plan edge-case checks
+   (burst, races, duplicates, out-of-order) — see [Edge-case scenarios](#edge-case-scenarios-dont-just-test-the-happy-path).
 2. **Write/update `noworries.yml`** (reference below). For a **new** feature or
    new checks, show the proposed checks to the user before the first run. For a
    pure re-run or a tag/scope change, just run — don't gate on the user.
@@ -53,10 +56,21 @@ services: [ postgres:16-alpine, mysql, mongodb, redis, kafka, elastic ]
 Container credentials are `noworries`/`noworries`/`noworries` where applicable
 (postgres, mysql). Mongo/redis/kafka/elastic run without auth.
 
-## Auto-injected environment (Spring Boot)
+## Frameworks
+
+Auto-detected from the project root (override with `app.framework`): **Spring
+Boot** (`pom.xml`/`gradle`/`mvnw`), **Go** (`go.mod`), **FastAPI** (`main.py`/
+`app.py` or a fastapi/uvicorn manifest), **Node.js** (`package.json`). Detection
+priority is Spring → Go → FastAPI → Node, so a JVM app that also ships a
+`package.json` still detects as Spring. Spring probes `/actuator/health`; the
+others wait for the TCP port (`health: none`) unless you set `app.health`.
+
+## Auto-injected environment
 
 The app is started with these set from the resolved random container ports — you
-usually **don't need to touch `application.yml`**:
+usually **don't need to touch config files**.
+
+**Spring Boot:**
 
 | Service   | Variables |
 | --------- | --------- |
@@ -66,15 +80,122 @@ usually **don't need to touch `application.yml`**:
 | redis     | `SPRING_DATA_REDIS_HOST`, `SPRING_DATA_REDIS_PORT` |
 | kafka     | `SPRING_KAFKA_BOOTSTRAP_SERVERS` |
 | elastic   | `SPRING_ELASTICSEARCH_URIS` |
+
+**Go / FastAPI / Node.js** (conventional connection strings — read whichever your
+client expects):
+
+| Service   | Variables |
+| --------- | --------- |
+| postgres  | `DATABASE_URL` (postgres://), `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE` |
+| mysql     | `DATABASE_URL` (mysql://), `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE` |
+| mongodb   | `MONGODB_URI`, `MONGO_URL` |
+| redis     | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT` |
+| kafka     | `KAFKA_BROKERS`, `KAFKA_BOOTSTRAP_SERVERS` |
+| elastic   | `ELASTICSEARCH_URL`, `ELASTIC_URL` |
+
+**All frameworks:**
+
+| Service   | Variables |
+| --------- | --------- |
 | (all)     | `NOWORRIES_<SERVICE>_HOST`, `NOWORRIES_<SERVICE>_PORT` (framework-agnostic) |
-| (app)     | `SERVER_PORT` (or `app.port_env`) |
+| (app)     | port env: `SERVER_PORT` (Spring) / `PORT` (Go/FastAPI/Node), or `app.port_env` |
+
+If both postgres and mysql are declared, `DATABASE_URL` is the last one wired —
+use the per-part vars (`PGHOST` vs `MYSQL_HOST`) to disambiguate.
+
+## Flink pipelines
+
+If the change is an Apache Flink **job** (not an HTTP app), use a `flink:` block
+**instead of `app:`**. noworries stands up an ephemeral Flink session cluster
+(jobmanager + taskmanager) on the same network as the declared services, builds
+and submits the job(s) over the REST API, waits for `RUNNING`, then runs checks.
+
+```yaml
+version: 1
+services: [kafka, postgres, elastic]
+flink:
+  image: flink:1.19        # optional
+  slots: 2                 # optional task slots
+  jobs:
+    - build: "mvn -q -DskipTests package"   # optional; runs first
+      jar: target/pipeline-0.1.jar          # required
+      entry_class: com.acme.Pipeline        # optional
+      args: ["--source", "events-in"]       # optional
+checks:
+  - name: "kafka -> postgres -> topic -> ES flows end to end"
+    kafka:   { produce: { topic: "events-in", key: "E1", message: { id: "E1" } } }
+    db:      { query: "SELECT status FROM processed WHERE id='E1'", expect_row: { status: "OK" } }
+  - name: "enriched event indexed"
+    kafka:   { expect_message: { topic: "events-enriched", contains: { id: "E1" }, timeout_ms: 15000 } }
+    elastic: { index: "events", doc_id: "E1", expect_source_contains: { id: "E1" } }
+```
+
+**Critical — in-network addresses.** The job runs *inside* the cluster, so it
+reaches services by compose name + container port, NOT the host ports: `kafka:9092`,
+`postgres:5432`, `elastic:9200`, `redis:6379`, `mysql:3306`, `mongodb:27017`.
+These are also injected as `NOWORRIES_<SERVICE>_HOST`/`_PORT`. Configure the job
+to use those. First run pulls the ~600MB Flink image — use `--timeout 600`.
+
+## Edge-case scenarios (don't just test the happy path)
+
+For **data pipelines** (Flink, Kafka consumers, any read-then-write flow), a
+single trigger→observe check is not enough — the code can pass it and still be
+wrong under load. When the change touches such a flow, **add edge-case checks**
+alongside the happy-path one. A check's `scenario:` block replaces the single
+`kafka.produce` with a generated flood; verify it with an ordinary observe
+assertion (usually an exact **count**). Pick the ones that match the risk:
+
+| `kind`         | What it does | What it catches | Verify with |
+| -------------- | ------------ | --------------- | ----------- |
+| `burst`        | floods N messages (optionally rate-limited) over many keys | dropped messages / can't keep up | `expect_row_count: N` (no loss) |
+| `concurrent`   | N writes to few keys across parallel producers → real races | lost updates, duplicate rows, stale final value | `expect_row_count: <keys>` + final value = highest `${i}` |
+| `duplicates`   | sends every message **twice** | non-idempotent / double-processing | `expect_row_count: N` (not `2N`) |
+| `out_of_order` | emits each key's events in **reverse** order (true order in `${i}`) | naive last-arrival-wins, bad windowing | final value = highest `${i}` |
+
+```yaml
+checks:
+  # happy path first:
+  - name: "single order persists"
+    kafka: { produce: { topic: orders-in, key: "A", message: { id: "A", amount: 5 } } }
+    db:    { query: "SELECT count(*) n FROM orders WHERE id='A'", expect_row: { n: 1 } }
+
+  # then the edge cases:
+  - name: "burst of 500 orders: none dropped"
+    scenario:
+      kind: burst
+      count: 500
+      concurrency: 8
+      kafka: { topic: orders-in, key: "ord-${seq}", message: { id: "${uuid}", amount: "${seq}" } }
+    db: { query: "SELECT count(*) n FROM orders", expect_row_count: 1, expect_row: { n: 500 } }
+
+  - name: "duplicate delivery is idempotent"
+    scenario:
+      kind: duplicates
+      count: 100
+      kafka: { topic: orders-in, key: "dup-${seq}", message: { id: "dup-${seq}" } }
+    db: { query: "SELECT count(*) n FROM orders WHERE id LIKE 'dup-%'", expect_row: { n: 100 } }
+
+  - name: "concurrent updates to one key stay consistent"
+    scenario:
+      kind: concurrent
+      count: 50
+      keys: 1
+      concurrency: 6
+      kafka: { topic: orders-in, key: "hot", message: { id: "hot", version: "${i}" } }
+    db: { query: "SELECT count(*) n FROM orders WHERE id='hot'", expect_row: { n: 1 } }
+```
+
+Template placeholders in `scenario.kafka.key`/`message`: `${seq}` (global index),
+`${i}` (per-key sequence / version), `${key}` (assigned key), `${uuid}` (unique
+id). Knobs: `count`, `concurrency`, `keys`, `rate_per_sec`. Scenarios flood the
+pipeline, so give the observe assertions time — raise `--timeout` for big bursts.
 
 ## Check reference
 
 A check may combine assertion types; it passes only if **all** pass. Order
 within a check: **seed** (mysql/mongodb `seed`) → **trigger** (`request`,
-`kafka.produce`) → **observe** (all queries/verifications). So "seed data → hit
-the API → check what changed" works.
+`kafka.produce`, `scenario`) → **observe** (all queries/verifications). So "seed
+data → hit the API → check what changed" works.
 
 ```yaml
 version: 1
@@ -135,6 +256,7 @@ Field summary: **http** `request{method,path,headers,body}` + `expect{status,bod
 **mongodb** `database`, `collection`, `seed[{insert|update{filter,set}|delete}]`, `find`, `expect_doc_contains`, `expect_count` ·
 **redis** `key`, `expect_exists`, `expect_value`, `expect_value_contains` ·
 **kafka** `produce{topic,key,message}`, `expect_message{topic,contains,timeout_ms}` ·
+**scenario** `kind` (burst|concurrent|duplicates|out_of_order), `kafka{topic,key,message}`, `count`, `concurrency`, `keys`, `rate_per_sec` (edge-case load trigger; verify with observe counts) ·
 **elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits`.
 
 ## Important behaviours

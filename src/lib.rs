@@ -9,6 +9,8 @@
 pub mod app;
 pub mod compose;
 pub mod docker;
+pub mod edgecases;
+pub mod flink;
 pub mod framework;
 pub mod git;
 pub mod lifecycle;

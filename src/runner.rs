@@ -505,16 +505,16 @@ fn fail_db(message: String) -> AssertionResult {
 
 /// Run DB assertions, retrying for a few seconds so an asynchronous side effect
 /// (e.g. a Kafka consumer writing to the DB) has time to land.
-fn run_db(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+fn run_db(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(db) = &check.db else { return };
     let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Postgres) else {
         out.push(fail_db("db assertion but no Postgres service is running".into()));
         return;
     };
 
-    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let deadline = Instant::now() + retry;
     let mut last = evaluate_db(db, ep.host_port);
-    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+    while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(400));
         last = evaluate_db(db, ep.host_port);
     }
@@ -615,15 +615,15 @@ fn fail_redis(message: String) -> AssertionResult {
 }
 
 /// Run Redis assertions, retrying briefly so an async cache write can land.
-fn run_redis(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+fn run_redis(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(r) = &check.redis else { return };
     let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Redis) else {
         out.push(fail_redis("redis assertion but no Redis service is running".into()));
         return;
     };
-    let deadline = Instant::now() + Duration::from_secs(if retry { 4 } else { 0 });
+    let deadline = Instant::now() + retry;
     let mut last = evaluate_redis(r, ep.host_port);
-    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+    while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(300));
         last = evaluate_redis(r, ep.host_port);
     }
@@ -693,6 +693,144 @@ fn kafka_produce(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<Assertion
             expected: None,
             actual: None,
         }),
+    }
+}
+
+/// Run an edge-case load/timing scenario (burst / concurrent / duplicates /
+/// out_of_order) as the trigger. Expands the declared scenario into a plan and
+/// produces its messages to Kafka, optionally across parallel producers to
+/// create real races. The check's observe assertions verify the invariant.
+fn run_scenario(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) {
+    let Some(scenario) = &check.scenario else { return };
+
+    let strategy = match crate::edgecases::resolve(&scenario.kind) {
+        Ok(s) => s,
+        Err(e) => {
+            out.push(AssertionResult {
+                kind: "scenario".into(),
+                passed: false,
+                message: e.to_string(),
+                expected: None,
+                actual: None,
+            });
+            return;
+        }
+    };
+    let plan = match strategy.plan(scenario) {
+        Ok(p) => p,
+        Err(e) => {
+            out.push(AssertionResult {
+                kind: "scenario".into(),
+                passed: false,
+                message: format!("scenario \"{}\" is invalid: {e}", scenario.kind),
+                expected: None,
+                actual: None,
+            });
+            return;
+        }
+    };
+
+    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Kafka) else {
+        out.push(AssertionResult {
+            kind: "scenario".into(),
+            passed: false,
+            message: "scenario declared but no Kafka service is running".into(),
+            expected: None,
+            actual: None,
+        });
+        return;
+    };
+    let host = format!("127.0.0.1:{}", ep.host_port);
+
+    match produce_plan(&host, &plan) {
+        Ok(n) => out.push(AssertionResult {
+            kind: "scenario".into(),
+            passed: true,
+            message: format!("{} — produced {n} message(s)", plan.summary),
+            expected: None,
+            actual: None,
+        }),
+        Err((n, e)) => out.push(AssertionResult {
+            kind: "scenario".into(),
+            passed: false,
+            message: format!(
+                "{} — failed after {n} message(s): {e}",
+                plan.summary
+            ),
+            expected: None,
+            actual: None,
+        }),
+    }
+}
+
+/// Produce every action in a plan, distributing them round-robin across
+/// `concurrency` producer threads (each with its own Kafka producer, so writes
+/// genuinely race). Returns the number produced, or (produced_so_far, error).
+fn produce_plan(
+    host: &str,
+    plan: &crate::edgecases::ScenarioPlan,
+) -> std::result::Result<usize, (usize, String)> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let concurrency = plan.concurrency.max(1);
+    let sent = AtomicUsize::new(0);
+    let delay = Duration::from_millis(plan.per_message_delay_ms);
+
+    let result = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for t in 0..concurrency {
+            let host = host.to_string();
+            let actions = &plan.actions;
+            let sent = &sent;
+            handles.push(scope.spawn(move || -> std::result::Result<(), String> {
+                use kafka::producer::{Producer, Record, RequiredAcks};
+                let mut producer = Producer::from_hosts(vec![host])
+                    .with_ack_timeout(Duration::from_secs(10))
+                    .with_required_acks(RequiredAcks::One)
+                    .create()
+                    .map_err(|e| e.to_string())?;
+                // Round-robin: thread `t` owns actions t, t+concurrency, ...
+                let mut idx = t;
+                while idx < actions.len() {
+                    let a = &actions[idx];
+                    let payload = serde_json::to_vec(&a.payload).map_err(|e| e.to_string())?;
+                    let res = match &a.key {
+                        Some(k) => producer.send(&Record::from_key_value(
+                            &a.topic,
+                            k.as_bytes(),
+                            payload.as_slice(),
+                        )),
+                        None => producer.send(&Record::from_value(&a.topic, payload.as_slice())),
+                    };
+                    res.map_err(|e| e.to_string())?;
+                    sent.fetch_add(1, Ordering::Relaxed);
+                    if !delay.is_zero() {
+                        sleep(delay);
+                    }
+                    idx += concurrency;
+                }
+                Ok(())
+            }));
+        }
+        let mut first_err: Option<String> = None;
+        for h in handles {
+            match h.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    first_err.get_or_insert(e);
+                }
+                Err(_) => {
+                    first_err.get_or_insert_with(|| "producer thread panicked".to_string());
+                }
+            }
+        }
+        first_err
+    });
+
+    let n = sent.load(Ordering::Relaxed);
+    match result {
+        None => Ok(n),
+        Some(e) => Err((n, e)),
     }
 }
 
@@ -953,7 +1091,7 @@ fn verify_elastic(base: &str, e: &crate::spec::ElasticAssertion) -> Vec<Assertio
     out
 }
 
-fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(e) = &check.elastic else { return };
     let Some(base) = elastic_base(ctx) else {
         out.push(fail_elastic("elastic assertion but no Elasticsearch service is running".into()));
@@ -972,9 +1110,9 @@ fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Ve
     if !has_verification {
         return;
     }
-    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let deadline = Instant::now() + retry;
     let mut last = verify_elastic(&base, e);
-    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+    while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(400));
         last = verify_elastic(&base, e);
     }
@@ -1117,7 +1255,7 @@ fn evaluate_mysql(m: &crate::spec::MySqlAssertion, port: u16) -> Vec<AssertionRe
     out
 }
 
-fn run_mysql_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+fn run_mysql_verify(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(m) = &check.mysql else { return };
     if m.query.is_none() {
         return;
@@ -1126,9 +1264,9 @@ fn run_mysql_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &m
         out.push(fail_mysql("mysql assertion but no MySQL service is running".into()));
         return;
     };
-    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let deadline = Instant::now() + retry;
     let mut last = evaluate_mysql(m, ep.host_port);
-    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+    while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(400));
         last = evaluate_mysql(m, ep.host_port);
     }
@@ -1271,7 +1409,7 @@ fn evaluate_mongo(m: &crate::spec::MongoAssertion, port: u16) -> Vec<AssertionRe
     out
 }
 
-fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &mut Vec<AssertionResult>) {
+fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(m) = &check.mongodb else { return };
     if m.find.is_none() && m.expect_count.is_none() {
         return;
@@ -1280,9 +1418,9 @@ fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &m
         out.push(fail_mongo("mongodb assertion but no MongoDB service is running".into()));
         return;
     };
-    let deadline = Instant::now() + Duration::from_secs(if retry { 6 } else { 0 });
+    let deadline = Instant::now() + retry;
     let mut last = evaluate_mongo(m, ep.host_port);
-    while retry && !last.iter().all(|a| a.passed) && Instant::now() < deadline {
+    while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(400));
         last = evaluate_mongo(m, ep.host_port);
     }
@@ -1290,6 +1428,23 @@ fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: bool, out: &m
 }
 
 /// Run every selected check sequentially and collect results.
+/// How long the observe assertions should retry for eventual consistency.
+/// A plain async effect gets ~6s; an edge-case scenario floods the pipeline, so
+/// the window grows with the message count (a 500-burst can take longer to
+/// drain than a single write) — capped so a hang still fails in bounded time.
+fn observe_retry_budget(check: &CheckSpec, async_effect: bool) -> Duration {
+    if !async_effect {
+        return Duration::from_secs(0);
+    }
+    let base = 6u64;
+    let extra = check
+        .scenario
+        .as_ref()
+        .map(|s| (s.count.unwrap_or(100) as u64) / 50)
+        .unwrap_or(0);
+    Duration::from_secs((base + extra).min(120))
+}
+
 pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult> {
     let mut results = Vec::new();
     for check in checks {
@@ -1308,19 +1463,25 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
             // it. A Kafka produce (which fires an async consumer) means the DB
             // assertion should be patient (retry) for eventual consistency.
             kafka_produce(check, ctx, &mut assertions);
-            // Any async trigger (a Kafka produce, or an HTTP call that kicks off
-            // background work) means the DB/Redis observers should be patient.
+            // Edge-case scenarios (burst / concurrent / duplicates / out_of_order)
+            // are a richer trigger — they flood Kafka to stress the pipeline.
+            run_scenario(check, ctx, &mut assertions);
+            // Any async trigger (a Kafka produce, a scenario flood, or an HTTP
+            // call that kicks off background work) means the DB/Redis observers
+            // should be patient.
             let async_effect = check.request.is_some()
+                || check.scenario.is_some()
                 || check
                     .kafka
                     .as_ref()
                     .map(|k| k.produce.is_some())
                     .unwrap_or(false);
-            run_db(check, ctx, async_effect, &mut assertions);
-            run_mysql_verify(check, ctx, async_effect, &mut assertions);
-            run_mongo_verify(check, ctx, async_effect, &mut assertions);
-            run_redis(check, ctx, async_effect, &mut assertions);
-            run_elastic(check, ctx, async_effect, &mut assertions);
+            let retry_budget = observe_retry_budget(check, async_effect);
+            run_db(check, ctx, retry_budget, &mut assertions);
+            run_mysql_verify(check, ctx, retry_budget, &mut assertions);
+            run_mongo_verify(check, ctx, retry_budget, &mut assertions);
+            run_redis(check, ctx, retry_budget, &mut assertions);
+            run_elastic(check, ctx, retry_budget, &mut assertions);
             kafka_expect(check, ctx, &mut assertions);
             if assertions.is_empty() {
                 error = Some("check declares no assertions (add request/expect, db, ...)".into());
@@ -1371,6 +1532,36 @@ mod tests {
         let exp = json!({"status": "PENDING"});
         let act = json!({"other": 1});
         assert!(!matches_subset(&exp, &act));
+    }
+
+    #[test]
+    fn retry_budget_scales_with_scenario_and_is_capped() {
+        use crate::spec::NoworriesSpec;
+        let plain = &NoworriesSpec::parse(
+            "version: 1\nservices: [postgres]\nchecks:\n  - name: x\n    db: { query: \"SELECT 1\" }\n",
+        )
+        .unwrap()
+        .checks[0];
+        // No async effect => no retry.
+        assert_eq!(observe_retry_budget(plain, false), Duration::from_secs(0));
+        // Async but no scenario => base 6s.
+        assert_eq!(observe_retry_budget(plain, true), Duration::from_secs(6));
+
+        let big = &NoworriesSpec::parse(
+            "version: 1\nservices: [kafka, postgres]\nchecks:\n  - name: b\n    scenario: { kind: burst, count: 500, kafka: { topic: t, message: { id: \"${seq}\" } } }\n    db: { query: \"SELECT 1\" }\n",
+        )
+        .unwrap()
+        .checks[0];
+        // 6 + 500/50 = 16s.
+        assert_eq!(observe_retry_budget(big, true), Duration::from_secs(16));
+
+        let huge = &NoworriesSpec::parse(
+            "version: 1\nservices: [kafka, postgres]\nchecks:\n  - name: h\n    scenario: { kind: burst, count: 100000, kafka: { topic: t, message: { id: \"${seq}\" } } }\n    db: { query: \"SELECT 1\" }\n",
+        )
+        .unwrap()
+        .checks[0];
+        // capped at 120s.
+        assert_eq!(observe_retry_budget(huge, true), Duration::from_secs(120));
     }
 
     #[test]

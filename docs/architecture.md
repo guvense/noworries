@@ -1,7 +1,7 @@
 # Architecture
 
-`noworries` is a small Rust CLI built around two extension points, so adding a
-new framework or service never touches the core.
+`noworries` is a small Rust CLI built around a few extension points, so adding a
+new framework, service, or edge-case scenario never touches the core.
 
 ```
 src/
@@ -10,26 +10,30 @@ src/
   framework/
     mod.rs           Framework trait + registry + shared helpers (interface only)
     spring_boot.rs   Spring Boot adapter          ← add a framework: new file here
+    go.rs / node.rs / python.rs   Go, Node.js, FastAPI adapters
   services/
     mod.rs           ServiceProvider trait + registry + shared types (interface only)
     postgres.rs      Postgres provider            ← add a service: new file here
-    kafka.rs         Kafka provider
-    redis.rs         Redis provider
+    kafka.rs / redis.rs / elastic.rs / mysql.rs / mongodb.rs
+  edgecases/
+    mod.rs           EdgeCase trait + registry + templating (interface only)
+    burst.rs / concurrent.rs / duplicates.rs / out_of_order.rs  ← add a scenario here
+  flink.rs           Flink session-cluster compose + REST job submission
   compose.rs         compose.test.yml generation
   lifecycle.rs       up / health / port-resolve / teardown (docker compose)
   app.rs             start the app subprocess, wire env, wait for health
-  runner.rs          HTTP + DB + Kafka + Redis check execution
+  runner.rs          HTTP + DB + Kafka + Redis + scenario check execution
   docker.rs          docker CLI helpers
   git.rs             changed-files detection for /noworries
   report.rs          output + results.json
 ```
 
-The `framework/` and `services/` modules keep the **interface** (`mod.rs`) apart
-from the **implementations** (one file each), so the two extension points grow
-without the core changing — new adapters are added, never edited into an
-existing file (open/closed).
+The `framework/`, `services/`, and `edgecases/` modules keep the **interface**
+(`mod.rs`) apart from the **implementations** (one file each), so the extension
+points grow without the core changing — new adapters/strategies are added, never
+edited into an existing file (open/closed).
 
-## The two traits
+## The extension traits
 
 ### `Framework` (`src/framework.rs`)
 
@@ -72,6 +76,33 @@ pub trait ServiceProvider {
 Services that must know their host port up front (like Kafka's advertised
 listener) return `true` from `needs_fixed_host_port()`, and compose generation
 reserves a free port for them instead of letting Docker randomize it.
+
+### `EdgeCase` (`src/edgecases/`)
+
+Everything scenario-specific — how a `kind` (burst / concurrent / duplicates /
+out_of_order) expands into a concrete load plan the runner then produces to Kafka
+(optionally across parallel producers, to create real races):
+
+```rust
+pub trait EdgeCase {
+    fn kind(&self) -> &'static str;
+    fn describe(&self) -> &'static str;
+    fn plan(&self, s: &ScenarioSpec) -> Result<ScenarioPlan>;
+}
+```
+
+**Adding a scenario** is a new file `src/edgecases/<kind>.rs` implementing
+`EdgeCase`, plus `pub mod <kind>;` and one line in `edgecases::registry()`. The
+strategy only builds the plan (pure, unit-testable); the runner owns execution
+(threads, producers, rate limiting) and the check's observe assertions verify the
+invariant. Kafka is the first sink; the plan/action shape leaves room for others.
+
+### Flink (`src/flink.rs`)
+
+Not a trait but a composed capability: it generates the session-cluster compose
+fragment (jobmanager + taskmanager, wired to in-network service coordinates) and
+drives the JobManager REST API to upload, run, and await each job. It slots into
+the existing `up → run → down` lifecycle via the compose file's `aux` containers.
 
 ## Design choices
 

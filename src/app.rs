@@ -79,8 +79,11 @@ pub fn build_env(
         Some(f) => f.env_wiring(endpoints),
         None => framework::generic_env(endpoints),
     };
+    // Precedence: explicit app.port_env > the framework's convention > generic
+    // default. Node/FastAPI/Go read `PORT`; Spring Boot reads `SERVER_PORT`.
     let port_env = app
         .and_then(|a| a.port_env.clone())
+        .or_else(|| fw.map(|f| f.default_port_env().to_string()))
         .unwrap_or_else(|| DEFAULT_PORT_ENV.to_string());
     env.insert(port_env, port.to_string());
     if let Some(a) = app {

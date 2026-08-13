@@ -90,3 +90,25 @@ services:
       interval: 5s
       timeout: 5s
       retries: 40
+
+  # Flink session cluster for the flink_it integration test. No container
+  # healthcheck (the image ships no curl/wget); the test gates on REST readiness
+  # itself. The JobManager REST/UI is published on localhost:8081.
+  flink-jobmanager:
+    image: flink:1.19
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+
+  flink-taskmanager:
+    image: flink:1.19
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
