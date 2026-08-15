@@ -6,9 +6,9 @@ allowed-tools: Bash(noworries:*), Bash(cargo:*), Bash(git:*), Bash(docker:*), Re
 
 # /noworries
 
-> **Requires `noworries` >= 0.3.0** (`noworries --version`). Older builds lack
-> the Go/FastAPI/Node frameworks and the `flink` block below; builds < 0.2.0 also
-> have the Kafka consumer offset-storage bug.
+> **Requires `noworries` >= 0.4.0** (`noworries --version`). Older builds lack
+> the extensible check types (graphql/metrics/snapshot/schema/sse/websocket/grpc/
+> traces), `externals`/`mock`, `setup` hooks, and interpolated `app.env`.
 
 After code has been written, verify it actually works: stand up its
 infrastructure in ephemeral Docker containers, start the app against them, run
@@ -136,6 +136,46 @@ reaches services by compose name + container port, NOT the host ports: `kafka:90
 These are also injected as `NOWORRIES_<SERVICE>_HOST`/`_PORT`. Configure the job
 to use those. First run pulls the ~600MB Flink image — use `--timeout 600`.
 
+## External / upstream services (app calls out to something noworries can't run)
+
+If the change makes the app call an **upstream service you don't containerize** —
+a partner/sandbox API, a separate auth server, a payment gateway — declare it
+under `externals:`. noworries injects its URL + credentials into the app's
+environment (it does **not** stand the service up). This is app → upstream;
+`services` is what noworries runs, `auth` is noworries → app.
+
+**How to fill it (do this from the code, then ask):**
+
+1. **Detect** the dependency: look in `application.properties`/`.yml`, config
+   classes, or client code for a base URL (e.g. `payments.base-url`,
+   `PARTNER_API_URL`) and how it authenticates (basic, bearer, api-key header).
+2. **Derive** what you can. Set `env`/`url_env` to the exact env var / property
+   the app reads. If auth details are in config/code, wire them.
+3. **Never hardcode secrets or guess a URL.** For the sandbox URL and any
+   credential you can't derive, reference `${VAR}` and **ask the user** for the
+   value (sandbox base URL, username/password, token, or API key). Values go in
+   the gitignored `.noworries.env`; an interactive run also prompts for missing
+   `${VAR}`.
+
+```yaml
+externals:
+  - name: payments
+    url: "${PAYMENTS_URL}"              # ask the user for the sandbox URL
+    url_env: PAYMENTS_BASE_URL          # the property/env your app actually reads
+    auth:
+      basic: { username: "${PAY_USER}", password: "${PAY_PASS}", header_env: PAYMENTS_AUTHORIZATION }
+      # or bearer: { token: "${PAY_TOKEN}", header_env: PAYMENTS_AUTHORIZATION }
+      # or api_key: { value: "${PAY_KEY}", header: "X-Api-Key", value_env: PAYMENTS_API_KEY }
+```
+
+Every external also sets conventional vars the app can read with no mapping:
+`NOWORRIES_EXTERNAL_<NAME>_URL`, `…_USER`/`…_PASSWORD`/`…_AUTHORIZATION` (basic,
+ready `Basic base64` header), `…_TOKEN`/`…_AUTHORIZATION` (bearer),
+`…_API_KEY`/`…_API_KEY_HEADER` (api-key). `<NAME>` is uppercased with
+non-alphanumerics → `_`. If the app has no matching env override yet, prefer
+adding one in code that reads the conventional var, or set the app's real var via
+`url_env`/`*_env`.
+
 ## Edge-case scenarios (don't just test the happy path)
 
 For **data pipelines** (Flink, Kafka consumers, any read-then-write flow), a
@@ -251,13 +291,28 @@ checks:
       expect_source_contains: { status: "PENDING" }
 ```
 
-Field summary: **http** `request{method,path,headers,body}` + `expect{status,body_contains}` ·
+Field summary: **http** `request{method,path,headers,body}` + `expect{status,body_contains,max_ms}` (max_ms = latency budget) ·
 **db/mysql** `query`, `expect_row` (deep subset on first row), `expect_row_count`; `mysql.seed` = SQL run before the request ·
 **mongodb** `database`, `collection`, `seed[{insert|update{filter,set}|delete}]`, `find`, `expect_doc_contains`, `expect_count` ·
 **redis** `key`, `expect_exists`, `expect_value`, `expect_value_contains` ·
 **kafka** `produce{topic,key,message}`, `expect_message{topic,contains,timeout_ms}` ·
-**scenario** `kind` (burst|concurrent|duplicates|out_of_order), `kafka{topic,key,message}`, `count`, `concurrency`, `keys`, `rate_per_sec` (edge-case load trigger; verify with observe counts) ·
-**elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits`.
+**scenario** `kind` (burst|concurrent|duplicates|out_of_order), `kafka{topic,key,message}`, `count`, `concurrency`, `keys`, `rate_per_sec`, `expect_throughput_per_sec` (edge-case load trigger; verify with observe counts) ·
+**external_calls** `[{external,method,path,body_contains,times}]` (assert the app called a mocked external — needs `externals[].mock`) ·
+**logs** `contains[]`, `absent[]` (grep `.noworries/app.log`) ·
+**elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits` ·
+**graphql** `path`, `query`, `variables`, `expect_data`, `expect_no_errors` ·
+**metrics** `path`, `metric`, `labels`, `expect` (Prometheus; `">= 1"` etc.) ·
+**snapshot** `file`, `ignore[]` (golden diff of the check's response; `--update-snapshots` to write) ·
+**schema** `table`, `has_columns[]`, `columns{col:type}` (Postgres information_schema) ·
+**sse** `path`, `contains`, `timeout_ms` · **websocket** `url`, `send`, `expect_message`, `timeout_ms` ·
+**grpc** `target`, `method`, `data`, `expect_contains` (needs `grpcurl` on PATH) ·
+**traces** `query_url`, `service`, `operation`, `tags`, `min_count` (query Jaeger/Tempo for OTel spans).
+
+Beyond checks: top-level **`setup`** = shell commands (migrations/fixtures, e.g.
+`./mvnw flyway:migrate`) run with the app's env after infra is up, before the app
+starts. **`externals[].mock`** stands up an in-process fake (stubs + records
+calls) so you can assert outbound behaviour with `external_calls` instead of
+hitting a real sandbox. Reports: `--junit <path>` / `--html <path>` for CI.
 
 ## Important behaviours
 
@@ -265,12 +320,13 @@ Field summary: **http** `request{method,path,headers,body}` + `expect{status,bod
   run — a check that writes `ABC` is visible to later checks. If a later check
   asserts "exactly 1 row", an earlier check that inserted the same key will
   break it. Make check data disjoint, or reset in a `seed`.
-- **Secrets:** reference `${VAR}` in `auth`/headers/body; put values in a
-  **`.noworries.env`** file (gitignored automatically). Derive auth from
+- **Secrets:** reference `${VAR}` in `auth`/`externals`/headers/body; put values
+  in a **`.noworries.env`** file (gitignored automatically). Derive auth from
   `application.properties`/code where possible; **ask the user** for the login
-  URL / credentials / API key you can't derive. If auth lives on a **separate
-  server** (not the app), use an absolute URL for `auth.login.request.path`
-  (e.g. `${AUTH_URL}/oauth/token`); a relative path hits the app under test.
+  URL / credentials / API key / upstream sandbox URL you can't derive. If auth
+  lives on a **separate server** (not the app), use an absolute URL for
+  `auth.login.request.path` (e.g. `${AUTH_URL}/oauth/token`); a relative path
+  hits the app under test. For an upstream the app *calls*, use `externals`.
 - **First run is slow:** Elasticsearch (~600MB), Kafka, and Mongo images pull on
   first use. Use `--timeout 600` for the first run of a project, otherwise a slow
   pull shows up as `NOT READY` (a timeout, not an app bug).

@@ -8,6 +8,13 @@ Pick one (see the [README](../README.md#installation) for all options):
 curl -fsSL https://raw.githubusercontent.com/guvense/noworries/main/install.sh | sh
 ```
 
+On **Windows**, the `curl | sh` and Homebrew options don't apply — use npm
+(`npm i -g @guvenseckin4/noworries`), download the
+`noworries-x86_64-pc-windows-msvc.tar.gz` binary from the
+[latest release](https://github.com/guvense/noworries/releases), or build from
+source (`cargo install --git https://github.com/guvense/noworries`). WSL2 works
+too and behaves like Linux.
+
 Then install the Claude Code command (once):
 
 ```bash
@@ -16,7 +23,8 @@ noworries install-command          # global: ~/.claude/commands
 noworries install-command --project
 ```
 
-Make sure **Docker is running** before you use it.
+Make sure **Docker is running** before you use it. noworries runs natively on
+**macOS, Linux, and Windows** (Docker Desktop on Windows; WSL2 also works).
 
 ## 2. Scaffold a spec
 

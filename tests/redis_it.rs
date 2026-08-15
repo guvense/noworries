@@ -60,7 +60,7 @@ fn run(app_cmd: &str, pg: u16, redis: u16) -> (usize, usize, bool) {
         ..Default::default()
     };
     let eps = endpoints(pg, redis);
-    let mut app = start_app(Some(&app_spec), None, Path::new("."), &eps, &out_dir).expect("app starts");
+    let mut app = start_app(Some(&app_spec), None, Path::new("."), &eps, &std::collections::BTreeMap::new(), &std::collections::BTreeMap::new(), &out_dir).expect("app starts");
     let ctx = RunnerContext::new(app.port, eps);
     let results = run_checks(&checks(), &ctx);
     app.stop();

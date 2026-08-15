@@ -47,6 +47,18 @@ pub struct RunnerContext {
     pub auth_headers: Vec<(String, String)>,
     /// Query params injected into every check request (from `auth`, e.g. API key).
     pub auth_query: Vec<(String, String)>,
+    /// The app's captured log file, for `logs:` assertions.
+    pub app_log_path: Option<std::path::PathBuf>,
+    /// Recorded requests per mocked external (name → shared recorder), for
+    /// `external_calls:` assertions.
+    pub external_mocks: BTreeMap<String, crate::mock::Recorder>,
+    /// Project directory (for file-based assertions like `snapshot`).
+    pub dir: std::path::PathBuf,
+    /// Whether `--update-snapshots` was passed (write goldens instead of failing).
+    pub update_snapshots: bool,
+    /// The most recent check `request` response body, so response-dependent
+    /// assertions (e.g. `snapshot`) can read it. Set by `run_http` each check.
+    pub http_capture: std::sync::Mutex<Option<String>>,
 }
 
 impl RunnerContext {
@@ -58,6 +70,11 @@ impl RunnerContext {
             env: BTreeMap::new(),
             auth_headers: Vec::new(),
             auth_query: Vec::new(),
+            app_log_path: None,
+            external_mocks: BTreeMap::new(),
+            dir: std::path::PathBuf::from("."),
+            update_snapshots: false,
+            http_capture: std::sync::Mutex::new(None),
         }
     }
 }
@@ -126,7 +143,7 @@ pub fn parse_env_file(content: &str) -> BTreeMap<String, String> {
 }
 
 /// Interpolate `${VAR}` in every string leaf of a JSON value.
-fn interpolate_json(v: &Json, env: &BTreeMap<String, String>) -> Json {
+pub fn interpolate_json(v: &Json, env: &BTreeMap<String, String>) -> Json {
     match v {
         Json::String(s) => Json::String(interpolate(s, env)),
         Json::Array(a) => Json::Array(a.iter().map(|x| interpolate_json(x, env)).collect()),
@@ -138,7 +155,7 @@ fn interpolate_json(v: &Json, env: &BTreeMap<String, String>) -> Json {
 }
 
 /// Standard-alphabet base64 (for HTTP Basic auth) — avoids a dependency.
-fn base64_encode(input: &[u8]) -> String {
+pub(crate) fn base64_encode(input: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in input.chunks(3) {
@@ -349,6 +366,7 @@ fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResul
         request = request.set(k, v);
     }
 
+    let started = Instant::now();
     let send_result = if let Some(body) = &req.body {
         let body_str = match body {
             serde_yaml::Value::String(s) => interpolate(s, &ctx.env),
@@ -359,6 +377,7 @@ fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResul
     } else {
         request.call()
     };
+    let elapsed_ms = started.elapsed().as_millis() as u64;
 
     let (status, body_text) = match send_result {
         Ok(resp) => {
@@ -370,6 +389,12 @@ fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResul
             anyhow::bail!("HTTP {} {} failed: {}", req.method, req.path, t);
         }
     };
+
+    // Stash the response body so response-dependent assertions (snapshot) can
+    // read it after run_http returns.
+    if let Ok(mut cap) = ctx.http_capture.lock() {
+        *cap = Some(body_text.clone());
+    }
 
     if let Some(expect) = &check.expect {
         if let Some(expected_status) = expect.status {
@@ -400,6 +425,20 @@ fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResul
                 },
                 expected: Some(expected),
                 actual: Some(truncate_json(parsed)),
+            });
+        }
+        if let Some(max_ms) = expect.max_ms {
+            let passed = elapsed_ms <= max_ms;
+            out.push(AssertionResult {
+                kind: "http-latency".into(),
+                passed,
+                message: if passed {
+                    format!("{} {} responded in {elapsed_ms}ms (<= {max_ms}ms)", req.method, req.path)
+                } else {
+                    format!("{} {} took {elapsed_ms}ms (> {max_ms}ms budget)", req.method, req.path)
+                },
+                expected: Some(Json::from(max_ms)),
+                actual: Some(Json::from(elapsed_ms)),
             });
         }
     }
@@ -645,6 +684,53 @@ fn unique_group() -> String {
     format!("noworries-{}-{}", std::process::id(), nanos)
 }
 
+/// Kafka errors that just mean "the topic/leader isn't ready yet". When a topic
+/// is auto-created on first use, the very first produce (and a consumer's first
+/// poll) races the creation and comes back with one of these — so we retry them
+/// while the topic propagates instead of failing the check. This is what caused
+/// the CI `UnknownTopicOrPartition` failure. Matched on the formatted error so it
+/// stays correct across kafka-crate versions (no brittle enum-variant matching).
+fn kafka_err_is_transient(e: &kafka::Error) -> bool {
+    let s = format!("{e:?}");
+    s.contains("UnknownTopicOrPartition")
+        || s.contains("LeaderNotAvailable")
+        || s.contains("NotLeaderForPartition")
+        || s.contains("RequestTimedOut")
+        || s.contains("NotEnoughReplicas")
+        || s.contains("GroupCoordinatorNotAvailable")
+}
+
+/// Send one record, retrying transient "topic not ready" errors until `deadline`.
+/// Only the first send to a freshly auto-created topic actually waits; once the
+/// topic exists later sends return immediately.
+fn kafka_send_retry(
+    producer: &mut kafka::producer::Producer,
+    topic: &str,
+    key: Option<&[u8]>,
+    payload: &[u8],
+    deadline: Instant,
+) -> std::result::Result<(), kafka::Error> {
+    use kafka::producer::Record;
+    loop {
+        let res = match key {
+            Some(k) => producer.send(&Record::from_key_value(topic, k, payload)),
+            None => producer.send(&Record::from_value(topic, payload)),
+        };
+        match res {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if Instant::now() >= deadline || !kafka_err_is_transient(&e) {
+                    return Err(e);
+                }
+                sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+/// How long to wait for a just-auto-created topic to become usable.
+const KAFKA_TOPIC_READY_SECS: u64 = 20;
+
 /// Produce the message declared by a check to its topic — used to trigger a
 /// consumer the feature under test added. The DB/redis assertion in the same
 /// check verifies the effect.
@@ -665,16 +751,19 @@ fn kafka_produce(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<Assertion
     let host = format!("127.0.0.1:{}", ep.host_port);
     let payload = yaml_to_bytes(&produce.message);
     let result = (|| -> anyhow::Result<()> {
-        use kafka::producer::{Producer, Record, RequiredAcks};
+        use kafka::producer::{Producer, RequiredAcks};
         let mut producer = Producer::from_hosts(vec![host.clone()])
             .with_ack_timeout(Duration::from_secs(5))
             .with_required_acks(RequiredAcks::One)
             .create()?;
-        if let Some(key) = &produce.key {
-            producer.send(&Record::from_key_value(&produce.topic, key.as_bytes(), payload.as_slice()))?;
-        } else {
-            producer.send(&Record::from_value(&produce.topic, payload.as_slice()))?;
-        }
+        let deadline = Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS);
+        kafka_send_retry(
+            &mut producer,
+            &produce.topic,
+            produce.key.as_deref().map(|k| k.as_bytes()),
+            payload.as_slice(),
+            deadline,
+        )?;
         Ok(())
     })();
 
@@ -742,25 +831,188 @@ fn run_scenario(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionR
     };
     let host = format!("127.0.0.1:{}", ep.host_port);
 
+    let started = Instant::now();
     match produce_plan(&host, &plan) {
-        Ok(n) => out.push(AssertionResult {
-            kind: "scenario".into(),
-            passed: true,
-            message: format!("{} — produced {n} message(s)", plan.summary),
-            expected: None,
-            actual: None,
-        }),
+        Ok(n) => {
+            let secs = started.elapsed().as_secs_f64().max(0.001);
+            let per_sec = (n as f64 / secs).round() as u64;
+            out.push(AssertionResult {
+                kind: "scenario".into(),
+                passed: true,
+                message: format!(
+                    "{} — produced {n} message(s) in {:.2}s (~{per_sec} msg/s)",
+                    plan.summary, secs
+                ),
+                expected: None,
+                actual: None,
+            });
+            if let Some(min) = scenario.expect_throughput_per_sec {
+                let passed = per_sec >= min as u64;
+                out.push(AssertionResult {
+                    kind: "scenario-throughput".into(),
+                    passed,
+                    message: if passed {
+                        format!("throughput ~{per_sec} msg/s (>= {min} required)")
+                    } else {
+                        format!("throughput ~{per_sec} msg/s (< {min} required)")
+                    },
+                    expected: Some(Json::from(min)),
+                    actual: Some(Json::from(per_sec)),
+                });
+            }
+        }
         Err((n, e)) => out.push(AssertionResult {
             kind: "scenario".into(),
             passed: false,
-            message: format!(
-                "{} — failed after {n} message(s): {e}",
-                plan.summary
-            ),
+            message: format!("{} — failed after {n} message(s): {e}", plan.summary),
             expected: None,
             actual: None,
         }),
     }
+}
+
+/// `logs:` assertion — grep the app's captured log for required/forbidden
+/// substrings. Retried within `retry` so a message the app logs asynchronously
+/// (after the triggering request returns) has time to appear.
+fn run_logs(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
+    let Some(logs) = &check.logs else { return };
+    let Some(path) = &ctx.app_log_path else {
+        out.push(AssertionResult {
+            kind: "logs".into(),
+            passed: false,
+            message: "logs assertion declared but the app was not started (no app.log)".into(),
+            expected: None,
+            actual: None,
+        });
+        return;
+    };
+
+    let deadline = Instant::now() + retry;
+    let mut results = evaluate_logs(logs, path);
+    // Only the "contains" checks benefit from waiting; retry until they pass or
+    // the deadline. "absent" is re-checked each pass too (a bad line appearing
+    // later should still fail).
+    while !results.iter().all(|a| a.passed) && Instant::now() < deadline {
+        sleep(Duration::from_millis(300));
+        results = evaluate_logs(logs, path);
+    }
+    out.extend(results);
+}
+
+fn evaluate_logs(logs: &crate::spec::LogAssertion, path: &std::path::Path) -> Vec<AssertionResult> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut out = Vec::new();
+    for needle in &logs.contains {
+        let passed = text.contains(needle);
+        out.push(AssertionResult {
+            kind: "logs".into(),
+            passed,
+            message: if passed {
+                format!("log contains \"{needle}\"")
+            } else {
+                format!("log does not contain \"{needle}\"")
+            },
+            expected: Some(Json::String(format!("contains: {needle}"))),
+            actual: None,
+        });
+    }
+    for needle in &logs.absent {
+        let passed = !text.contains(needle);
+        out.push(AssertionResult {
+            kind: "logs".into(),
+            passed,
+            message: if passed {
+                format!("log is free of \"{needle}\"")
+            } else {
+                format!("log unexpectedly contains \"{needle}\"")
+            },
+            expected: Some(Json::String(format!("absent: {needle}"))),
+            actual: None,
+        });
+    }
+    out
+}
+
+/// `external_calls:` assertion — verify the app called a mocked external with a
+/// matching request. Retried within `retry` for calls the app makes
+/// asynchronously.
+fn run_external_calls(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
+    if check.external_calls.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + retry;
+    let mut results = evaluate_external_calls(check, ctx);
+    while !results.iter().all(|a| a.passed) && Instant::now() < deadline {
+        sleep(Duration::from_millis(300));
+        results = evaluate_external_calls(check, ctx);
+    }
+    out.extend(results);
+}
+
+fn evaluate_external_calls(check: &CheckSpec, ctx: &RunnerContext) -> Vec<AssertionResult> {
+    let mut out = Vec::new();
+    for call in &check.external_calls {
+        let Some(recorder) = ctx.external_mocks.get(&call.external) else {
+            out.push(AssertionResult {
+                kind: "external_calls".into(),
+                passed: false,
+                message: format!(
+                    "external \"{}\" has no mock (declare externals[].mock)",
+                    call.external
+                ),
+                expected: None,
+                actual: None,
+            });
+            continue;
+        };
+        let expected_body = call.body_contains.as_ref().map(yaml_to_json);
+        let recorded = recorder.lock().map(|r| r.clone()).unwrap_or_default();
+        let matches = recorded
+            .iter()
+            .filter(|r| {
+                let method_ok = call
+                    .method
+                    .as_ref()
+                    .map(|m| m.eq_ignore_ascii_case(&r.method))
+                    .unwrap_or(true);
+                let path_ok = r.path == call.path;
+                let body_ok = expected_body
+                    .as_ref()
+                    .map(|exp| matches_subset(exp, &r.json()))
+                    .unwrap_or(true);
+                method_ok && path_ok && body_ok
+            })
+            .count();
+
+        let (passed, msg) = match call.times {
+            Some(n) => (
+                matches == n,
+                format!(
+                    "{} {} on \"{}\": {matches} call(s), expected {n}",
+                    call.method.as_deref().unwrap_or("ANY"),
+                    call.path,
+                    call.external
+                ),
+            ),
+            None => (
+                matches >= 1,
+                format!(
+                    "{} {} on \"{}\": {matches} matching call(s)",
+                    call.method.as_deref().unwrap_or("ANY"),
+                    call.path,
+                    call.external
+                ),
+            ),
+        };
+        out.push(AssertionResult {
+            kind: "external_calls".into(),
+            passed,
+            message: msg,
+            expected: call.times.map(Json::from),
+            actual: Some(Json::from(matches)),
+        });
+    }
+    out
 }
 
 /// Produce every action in a plan, distributing them round-robin across
@@ -783,7 +1035,7 @@ fn produce_plan(
             let actions = &plan.actions;
             let sent = &sent;
             handles.push(scope.spawn(move || -> std::result::Result<(), String> {
-                use kafka::producer::{Producer, Record, RequiredAcks};
+                use kafka::producer::{Producer, RequiredAcks};
                 let mut producer = Producer::from_hosts(vec![host])
                     .with_ack_timeout(Duration::from_secs(10))
                     .with_required_acks(RequiredAcks::One)
@@ -794,15 +1046,17 @@ fn produce_plan(
                 while idx < actions.len() {
                     let a = &actions[idx];
                     let payload = serde_json::to_vec(&a.payload).map_err(|e| e.to_string())?;
-                    let res = match &a.key {
-                        Some(k) => producer.send(&Record::from_key_value(
-                            &a.topic,
-                            k.as_bytes(),
-                            payload.as_slice(),
-                        )),
-                        None => producer.send(&Record::from_value(&a.topic, payload.as_slice())),
-                    };
-                    res.map_err(|e| e.to_string())?;
+                    // Retry the first send while the (possibly auto-created) topic
+                    // becomes ready; later sends return immediately.
+                    let deadline = Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS);
+                    kafka_send_retry(
+                        &mut producer,
+                        &a.topic,
+                        a.key.as_deref().map(|k| k.as_bytes()),
+                        payload.as_slice(),
+                        deadline,
+                    )
+                    .map_err(|e| e.to_string())?;
                     sent.fetch_add(1, Ordering::Relaxed);
                     if !delay.is_zero() {
                         sleep(delay);
@@ -857,26 +1111,46 @@ fn kafka_expect(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionR
 
     let found = (|| -> anyhow::Result<bool> {
         use kafka::consumer::{Consumer, FetchOffset, GroupOffsetStorage};
-        let mut consumer = Consumer::from_hosts(vec![host.clone()])
-            .with_topic(expect.topic.clone())
-            .with_fallback_offset(FetchOffset::Earliest)
-            .with_group(unique_group())
-            // Required by the kafka crate once a group is set — without it,
-            // polling fails with "Operation requires offset storage but no
-            // offset storage was set".
-            .with_offset_storage(Some(GroupOffsetStorage::Kafka))
-            .create()?;
         let deadline = Instant::now() + timeout;
+        // Build the consumer, retrying while a just-created topic propagates.
+        let mut consumer = loop {
+            match Consumer::from_hosts(vec![host.clone()])
+                .with_topic(expect.topic.clone())
+                .with_fallback_offset(FetchOffset::Earliest)
+                .with_group(unique_group())
+                // Required by the kafka crate once a group is set — without it,
+                // polling fails with "Operation requires offset storage but no
+                // offset storage was set".
+                .with_offset_storage(Some(GroupOffsetStorage::Kafka))
+                .create()
+            {
+                Ok(c) => break c,
+                Err(e) => {
+                    if Instant::now() >= deadline || !kafka_err_is_transient(&e) {
+                        return Err(e.into());
+                    }
+                    sleep(Duration::from_millis(400));
+                }
+            }
+        };
         while Instant::now() < deadline {
-            let sets = consumer.poll()?;
-            for set in sets.iter() {
-                for m in set.messages() {
-                    let parsed: Json = serde_json::from_slice(m.value)
-                        .unwrap_or_else(|_| Json::String(String::from_utf8_lossy(m.value).into_owned()));
-                    if matches_subset(&expected_for_match, &parsed) {
-                        return Ok(true);
+            // A transient error here just means the topic isn't fully ready —
+            // keep polling until the deadline rather than failing the check.
+            match consumer.poll() {
+                Ok(sets) => {
+                    for set in sets.iter() {
+                        for m in set.messages() {
+                            let parsed: Json = serde_json::from_slice(m.value).unwrap_or_else(|_| {
+                                Json::String(String::from_utf8_lossy(m.value).into_owned())
+                            });
+                            if matches_subset(&expected_for_match, &parsed) {
+                                return Ok(true);
+                            }
+                        }
                     }
                 }
+                Err(e) if kafka_err_is_transient(&e) => {}
+                Err(e) => return Err(e.into()),
             }
             sleep(Duration::from_millis(200));
         }
@@ -1127,7 +1401,7 @@ fn fail_mysql(message: String) -> AssertionResult {
     AssertionResult { kind: "mysql".into(), passed: false, message, expected: None, actual: None }
 }
 
-fn mysql_conn(port: u16) -> mysql::Result<mysql::Conn> {
+pub(crate) fn mysql_conn(port: u16) -> mysql::Result<mysql::Conn> {
     use crate::services::mysql::{MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER};
     let url = format!("mysql://{MYSQL_USER}:{MYSQL_PASSWORD}@127.0.0.1:{port}/{MYSQL_DB}");
     mysql::Conn::new(mysql::Opts::from_url(&url)?)
@@ -1475,7 +1749,13 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
                     .kafka
                     .as_ref()
                     .map(|k| k.produce.is_some())
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                // Eventual-consistency observers deserve the retry window even
+                // without an explicit trigger in the same check (the effect may
+                // have been set up by a prior check or an already-running app).
+                || check.metrics.is_some()
+                || check.traces.is_some()
+                || check.schema.is_some();
             let retry_budget = observe_retry_budget(check, async_effect);
             run_db(check, ctx, retry_budget, &mut assertions);
             run_mysql_verify(check, ctx, retry_budget, &mut assertions);
@@ -1483,6 +1763,14 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
             run_redis(check, ctx, retry_budget, &mut assertions);
             run_elastic(check, ctx, retry_budget, &mut assertions);
             kafka_expect(check, ctx, &mut assertions);
+            // Observe the app's side effects: what it logged and which mocked
+            // externals it called (both may lag the trigger → retry-aware).
+            run_external_calls(check, ctx, retry_budget, &mut assertions);
+            run_logs(check, ctx, retry_budget, &mut assertions);
+            // Extensible assertion types (graphql / metrics / snapshot / schema /
+            // sse / websocket / grpc / traces) — each pluggable via the checks
+            // registry (open/closed: new type = new file + one registry line).
+            crate::checks::run_all(check, ctx, retry_budget, &mut assertions);
             if assertions.is_empty() {
                 error = Some("check declares no assertions (add request/expect, db, ...)".into());
             }

@@ -4,12 +4,15 @@ A check describes an observable behaviour and the assertions that prove it. A
 check can mix assertion types; it passes only if **every** assertion passes.
 Assertions run in this order so that actions happen before observations:
 
-1. HTTP request (`request` + `expect`)
+1. HTTP request (`request` + `expect`, incl. `max_ms` latency)
 2. Kafka `produce`
 3. `scenario` — edge-case load/timing flood (burst / concurrent / duplicates / out_of_order)
 4. DB assertion (`db`) — retries for eventual consistency (window scales with a scenario's size)
 5. Redis assertion (`redis`) — retries briefly
 6. Kafka `expect_message`
+7. `external_calls` — assert the app called a mocked external (retry-aware)
+8. `logs` — assert the app log contains / omits patterns (retry-aware)
+9. Protocol & observability types — `graphql`, `metrics`, `snapshot`, `schema`, `sse`, `websocket`, `grpc`, `traces` (see below)
 
 ## HTTP
 
@@ -29,6 +32,8 @@ Assertions run in this order so that actions happen before observations:
 - `expect.body_contains` — a **deep partial match**: every field you list must
   appear in the response (extra fields are ignored). Works on objects and array
   prefixes.
+- `expect.max_ms` — latency budget: fail if the response took longer than this
+  many milliseconds (`expect: { status: 200, max_ms: 300 }`).
 
 ## Database (Postgres)
 
@@ -125,9 +130,13 @@ check's `db` / `mysql` / `mongodb` / `elastic` assertions (usually an exact
 | `concurrency` | burst/dupes/oo 1; concurrent 4 (min 2) | Parallel producer threads. Higher = more contention. |
 | `keys`        | burst = `count`; concurrent/oo 1 | Distinct keys the load spreads over. Fewer keys + more concurrency = more contention on one key. |
 | `rate_per_sec`| unbounded          | Optional cap on messages/second **per producer**. |
+| `expect_throughput_per_sec` | none | Assert the achieved produce throughput was at least this many msgs/second (fails otherwise). |
 | `kafka.topic` | —                  | Target topic (required). |
 | `kafka.key`   | `k<n>` per strategy | Key template. |
 | `kafka.message` | —                | Message template (required), serialized to JSON. |
+
+The scenario assertion always reports the achieved rate (e.g. `~4200 msg/s`);
+`expect_throughput_per_sec` turns that into a pass/fail gate.
 
 ### Template placeholders
 
@@ -297,6 +306,162 @@ the check.
 
 (The container uses `user/password/db = noworries`. Declare it as `mysql` /
 `mysql:8.0` → `mysql:8.4` by default.)
+
+## External calls (mocks)
+
+When an external declares a [`mock`](configuration.md#mocking-an-external-mock),
+noworries records every request the app makes to it. `external_calls` asserts the
+app actually reached out — a request-level assertion on the app's *outbound*
+behaviour, retried for calls the app makes asynchronously.
+
+```yaml
+- name: "creating an order charges the customer"
+  request: { method: POST, path: /orders, body: { sku: "A", amount: 100 } }
+  expect:  { status: 201 }
+  external_calls:
+    - external: payments          # matches externals[].name
+      method: POST                # optional; omit to match any method
+      path: /charge               # exact path
+      body_contains: { amount: 100 }   # deep-subset match on the recorded JSON body
+      times: 1                    # exact count; omit for "at least one"
+```
+
+## Logs
+
+Assert the app's captured log (`.noworries/app.log`) contains — or is free of —
+substrings. Great for "the handler logged this" and "no stack trace / no ERROR".
+Retried within the same eventual-consistency window as the DB observers, so a
+line the app writes just after responding still counts.
+
+```yaml
+- name: "processing logs success and no errors"
+  kafka: { produce: { topic: orders, key: "X1", message: { sku: "X1" } } }
+  logs:
+    contains: ["OrderProcessed X1"]     # all must appear
+    absent:   ["ERROR", "Exception"]    # none may appear
+```
+
+## Protocol & observability assertions
+
+These extend a check beyond HTTP/DB. Each is an independent assertion type
+(pluggable via `src/checks/`), so a check can combine them with the others.
+
+### GraphQL (`graphql`)
+
+POST a query/mutation and assert on `data` / `errors`.
+
+```yaml
+- name: "order query returns status"
+  graphql:
+    path: /graphql                 # default /graphql; relative → app, or absolute URL
+    query: "query($id: ID!) { order(id: $id) { status } }"
+    variables: { id: "ABC" }       # optional; values interpolate ${VAR}
+    expect_data: { order: { status: "PENDING" } }   # deep-subset on data
+    expect_no_errors: true         # default: fail if errors[] is non-empty
+```
+
+### Prometheus metrics (`metrics`)
+
+Scrape a metrics endpoint, match one series by name + labels, compare its value.
+
+```yaml
+- name: "the request was counted"
+  request: { method: POST, path: /orders, body: { sku: "A" } }
+  expect:  { status: 201 }
+  metrics:
+    path: /actuator/prometheus     # default /metrics
+    metric: http_server_requests_seconds_count
+    labels: { status: "201", uri: "/orders" }   # subset match
+    expect: ">= 1"                 # >=, <=, >, <, ==, = ; omit to just require presence
+```
+
+### Snapshot / golden (`snapshot`)
+
+Capture the check's HTTP `request` response body and diff it against a saved
+golden file. Run once with `--update-snapshots` to create/refresh the golden.
+
+```yaml
+- name: "order response shape is stable"
+  request: { method: GET, path: /orders/ABC }
+  snapshot:
+    file: snapshots/order.json     # relative to the project dir
+    ignore: [ "$.id", "$.createdAt" ]   # blank volatile fields before comparing
+```
+
+### DB schema (`schema`, Postgres or MySQL)
+
+Assert a table's columns (and optionally types) via `information_schema` — uses
+Postgres if declared, otherwise MySQL. On MySQL, `schema` is the database name.
+
+```yaml
+- name: "orders table migrated correctly"
+  schema:
+    table: orders
+    schema: public                 # optional (default public)
+    has_columns: [id, sku, status] # must exist
+    columns: { qty: int, price: numeric, created_at: timestamp }  # type (loose) match
+```
+
+### Server-Sent Events (`sse`)
+
+Open a stream and wait for an event whose JSON `data` matches.
+
+```yaml
+- name: "an OrderCreated event is streamed"
+  request: { method: POST, path: /orders, body: { sku: "A" } }
+  expect:  { status: 201 }
+  sse:
+    path: /events
+    contains: { type: "OrderCreated" }   # deep-subset on an event's data
+    timeout_ms: 5000
+```
+
+### WebSocket (`websocket`)
+
+Connect, optionally send a message, and await a matching message.
+
+```yaml
+- name: "subscription pushes the update"
+  websocket:
+    url: "ws://127.0.0.1:${SERVER_PORT}/ws"   # or a relative path → ws://app
+    send: { subscribe: "orders" }             # optional; JSON or string
+    expect_message: { type: "OrderCreated" }  # deep-subset on a received message
+    timeout_ms: 5000
+```
+
+### gRPC (`grpc`)
+
+Calls a method via **`grpcurl`** (must be on PATH; needs server reflection, or
+give `protos`/`import_paths`). Keeps noworries free of a heavy gRPC/proto stack.
+
+```yaml
+- name: "GetOrder returns the order"
+  grpc:
+    target: "127.0.0.1:${NOWORRIES_GRPC_PORT}"   # host:port
+    method: "orders.OrderService/GetOrder"
+    data: { id: "ABC" }                          # request JSON
+    expect_contains: { status: "PENDING" }       # deep-subset on the response
+    plaintext: true                              # default true (no TLS)
+    # protos: [orders.proto]                     # if not using reflection
+    # import_paths: [proto]
+```
+
+### OpenTelemetry traces (`traces`)
+
+The app exports spans to a trace backend (Jaeger/Tempo); noworries queries the
+backend's HTTP API and asserts matching traces exist.
+
+```yaml
+- name: "the request produced a trace"
+  request: { method: POST, path: /orders, body: { sku: "A" } }
+  expect:  { status: 201 }
+  traces:
+    query_url: "http://127.0.0.1:16686/api/traces"   # Jaeger query API
+    service: "orders-service"
+    operation: "POST /orders"      # optional
+    tags: { "http.status_code": "201" }   # optional (subset)
+    min_count: 1                   # default 1
+```
 
 ## Reading results
 

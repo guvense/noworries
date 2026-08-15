@@ -31,7 +31,7 @@ fn login_auth() -> AuthSpec {
     AuthSpec {
         login: Some(AuthLogin {
             request: req,
-            expect: Some(HttpExpectSpec { status: Some(200), body_contains: None }),
+            expect: Some(HttpExpectSpec { status: Some(200), body_contains: None, max_ms: None }),
             token_from: "$.accessToken".to_string(),
             header: None,
             scheme: None,
@@ -59,7 +59,7 @@ fn login_flow_authenticates_protected_endpoint() {
     let mut env = BTreeMap::new();
     env.insert("AUTH_PASS".to_string(), "secret".to_string());
 
-    let mut app = start_app(Some(&app_spec), None, Path::new("."), &[], &out_dir).expect("app starts");
+    let mut app = start_app(Some(&app_spec), None, Path::new("."), &[], &std::collections::BTreeMap::new(), &std::collections::BTreeMap::new(), &out_dir).expect("app starts");
 
     // Without auth, the protected check should fail (401).
     let ctx_noauth = RunnerContext::new(app.port, vec![]);

@@ -13,7 +13,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use noworries::spec::{NoworriesSpec, SPEC_FILENAME};
-use noworries::{app, compose, flink, framework, git, lifecycle, report, runner};
+use noworries::{
+    app, compose, externals, flink, framework, git, lifecycle, mock, report, reports, runner,
+};
 
 const OUT_DIR: &str = ".noworries";
 const OUT_FILE: &str = "compose.test.yml";
@@ -48,6 +50,18 @@ struct Cli {
     /// Also print machine-readable JSON where applicable.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Write a JUnit XML report to this path (for CI).
+    #[arg(long, global = true)]
+    junit: Option<String>,
+
+    /// Write a self-contained HTML report to this path.
+    #[arg(long, global = true)]
+    html: Option<String>,
+
+    /// Write/refresh `snapshot` golden files instead of failing on a diff.
+    #[arg(long, global = true)]
+    update_snapshots: bool,
 
     /// Project directory.
     #[arg(long, default_value = ".", global = true)]
@@ -99,10 +113,7 @@ fn set_app_pid(pid: i32) {
 fn run_teardown() {
     if let Some(t) = teardown_slot().lock().unwrap().take() {
         if let Some(pid) = t.app_pid {
-            unsafe {
-                libc::kill(-pid, libc::SIGTERM);
-                libc::kill(-pid, libc::SIGKILL);
-            }
+            app::kill_tree(pid);
         }
         let _ = lifecycle::down(&t.project, &t.file);
     }
@@ -223,25 +234,49 @@ fn confirm(question: &str) -> bool {
 
 const STARTER_SPEC: &str = r#"version: 1
 
-# Infrastructure this feature needs. Supported: postgres, kafka, redis.
+# Infrastructure this feature needs. Supported:
+#   postgres · mysql · mongodb · redis · kafka · elastic(search)
+# Declare as `kind` or `kind:tag`.
 services:
   - postgres:16-alpine
+  # - redis
+  # - kafka
 
 # How to launch the app under test. Optional — auto-detected from the framework
-# (Spring Boot today) when omitted. `framework:` can force a specific adapter.
+# (Spring Boot, Go, FastAPI, Node.js) when omitted. `framework:` forces one.
 # app:
 #   start: "./mvnw spring-boot:run"
-#   health: "/actuator/health"
+#   health: "/actuator/health"        # or "none" for TCP-only readiness
 #   ready_timeout: 180
+#   env: { LOG_LEVEL: "info" }         # ${VAR} values resolve from .noworries.env
+
+# Migrations / fixtures run after infra is up, before the app starts:
+# setup:
+#   - "./mvnw -q flyway:migrate"
+
+# Upstream services the app calls out to (noworries injects the URL + creds;
+# add `mock:` to stand up an in-process fake and assert calls via external_calls):
+# externals:
+#   - name: payments
+#     url: "${PAYMENTS_URL}"
+#     auth: { basic: { username: "${PAY_USER}", password: "${PAY_PASS}", header_env: PAYMENTS_AUTHORIZATION } }
+
+# Auth for noworries' own requests to the app (login / bearer / basic / api_key):
+# auth:
+#   bearer: { token: "${API_TOKEN}" }
 
 checks:
   - name: "app health endpoint responds"
     tags: [smoke]
-    request:
-      method: GET
-      path: /actuator/health
-    expect:
-      status: 200
+    request: { method: GET, path: /actuator/health }
+    expect:  { status: 200 }
+
+  # A check can combine many assertion types (all must pass):
+  # - name: "create order: 201, persists, indexed, fast"
+  #   request: { method: POST, path: /orders, body: { sku: "ABC", qty: 2 } }
+  #   expect:  { status: 201, body_contains: { sku: "ABC" }, max_ms: 500 }
+  #   db:      { query: "SELECT status FROM orders WHERE sku='ABC'", expect_row: { status: "PENDING" } }
+  #   logs:    { contains: ["OrderCreated"], absent: ["ERROR"] }
 "#;
 
 fn cmd_init(dir: &str) -> Result<i32> {
@@ -387,6 +422,36 @@ fn cmd_run(cli: &Cli) -> Result<i32> {
     Ok(exit)
 }
 
+/// Run the declared setup/migration hooks with the app's env wiring (DB URLs,
+/// external creds, etc.). Executed after infra is healthy and before the app
+/// starts; a non-zero exit aborts the run.
+#[allow(clippy::too_many_arguments)]
+fn run_setup_hooks(
+    cmds: &[String],
+    dir: &str,
+    app_spec: Option<&noworries::spec::AppSpec>,
+    fw: Option<&dyn framework::Framework>,
+    endpoints: &[lifecycle::ServiceEndpoint],
+    external_env: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    // Same env the app will get (service wiring + app.env + externals). The port
+    // env is irrelevant to a migration, so a placeholder is fine.
+    let env = app::build_env(app_spec, fw, endpoints, external_env, vars, 0);
+    for cmd in cmds {
+        report::info(&format!("  $ {cmd}"));
+        let status = app::shell_command(cmd)
+            .current_dir(dir)
+            .envs(&env)
+            .status()
+            .map_err(|e| anyhow::anyhow!("could not run `{cmd}`: {e}"))?;
+        if !status.success() {
+            anyhow::bail!("`{cmd}` exited with {status}");
+        }
+    }
+    Ok(())
+}
+
 /// After infra is healthy: start the app (if any check needs it), run the
 /// checks, print + persist the structured report, and return the exit code.
 #[allow(clippy::too_many_arguments)]
@@ -450,10 +515,58 @@ fn run_checks_flow(
         env.insert(k, v);
     }
 
+    // Start in-process mocks for any external that declares one, so the app can
+    // call them and we can record + assert on those calls. Their URLs override
+    // the external's declared `url`.
+    let mut mocks: Vec<mock::MockHandle> = Vec::new();
+    let mut mock_urls: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for ext in &spec.externals {
+        if let Some(m) = &ext.mock {
+            match mock::start_mock(&ext.name, m) {
+                Ok(h) => {
+                    report::ok(&format!("mock \"{}\" listening at {}", ext.name, h.url));
+                    mock_urls.insert(ext.name.clone(), h.url.clone());
+                    mocks.push(h);
+                }
+                Err(e) => {
+                    report::error_line(&format!("failed to start mock \"{}\": {e}", ext.name));
+                    return 1;
+                }
+            }
+        }
+    }
+
+    // External/upstream dependencies (sandbox URLs + credentials) the app calls
+    // out to — injected into the app's environment (not stood up by noworries).
+    let external_env = externals::resolve_external_env(&spec.externals, &env, &mock_urls);
+    if !external_env.is_empty() {
+        let names: Vec<&str> = spec.externals.iter().map(|e| e.name.as_str()).collect();
+        report::info(&format!(
+            "Externals wired ({} var(s) for: {})",
+            external_env.len(),
+            names.join(", ")
+        ));
+    }
+
+    // Setup / migration hooks: run declared shell commands (with the same env
+    // wiring the app gets) after infra is healthy and before the app starts, so
+    // DB migrations / fixtures are in place. A failing hook aborts the run.
+    if !spec.setup.is_empty() {
+        report::info("");
+        report::info(&format!("Running {} setup hook(s)…", spec.setup.len()));
+        if let Err(e) = run_setup_hooks(&spec.setup, dir, spec.app.as_ref(), framework, &handles.endpoints, &external_env, &env) {
+            report::error_line(&format!("setup hook failed: {e}"));
+            for m in &mut mocks {
+                m.stop();
+            }
+            return 1;
+        }
+    }
+
     let app_port = if needs_app {
         report::info("");
         report::info("Starting app…");
-        match app::start_app(spec.app.as_ref(), framework, Path::new(dir), &handles.endpoints, out_dir) {
+        match app::start_app(spec.app.as_ref(), framework, Path::new(dir), &handles.endpoints, &external_env, &env, out_dir) {
             Ok(a) => {
                 report::ok(&format!(
                     "app ready on http://127.0.0.1:{} (log: {}/app.log)",
@@ -487,21 +600,47 @@ fn run_checks_flow(
 
     report::info("");
     report::info(&format!("Running {} check(s)…", selected.len()));
+    let external_mocks = mocks
+        .iter()
+        .map(|m| (m.name.clone(), m.recorder()))
+        .collect();
     let ctx = runner::RunnerContext {
         app_port,
         endpoints: handles.endpoints.clone(),
         env,
         auth_headers: auth.headers,
         auth_query: auth.query,
+        app_log_path: started_app.as_ref().map(|a| Path::new(&a.log_path).to_path_buf()),
+        external_mocks,
+        dir: Path::new(dir).to_path_buf(),
+        update_snapshots: cli.update_snapshots,
+        http_capture: std::sync::Mutex::new(None),
     };
     let results = runner::run_checks(selected, &ctx);
     let summary = report::print_results(results);
+
+    // Mocks have served their purpose; stop them before teardown.
+    for m in &mut mocks {
+        m.stop();
+    }
 
     let results_path = out_dir.join("results.json");
     if let Err(e) = report::write_results_json(&results_path, &summary) {
         report::warn(&format!("could not write results.json: {e}"));
     } else {
         report::info(&format!("(machine-readable results: {}/results.json)", OUT_DIR));
+    }
+    if let Some(path) = &cli.junit {
+        match std::fs::write(path, reports::junit_xml(&summary)) {
+            Ok(()) => report::info(&format!("(JUnit report: {path})")),
+            Err(e) => report::warn(&format!("could not write JUnit report: {e}")),
+        }
+    }
+    if let Some(path) = &cli.html {
+        match std::fs::write(path, reports::html_report(&summary)) {
+            Ok(()) => report::info(&format!("(HTML report: {path})")),
+            Err(e) => report::warn(&format!("could not write HTML report: {e}")),
+        }
     }
     if cli.json {
         if let Ok(j) = serde_json::to_string(&summary) {

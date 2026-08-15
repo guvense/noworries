@@ -188,6 +188,9 @@ pub struct HttpExpectSpec {
     pub status: Option<u16>,
     #[serde(default)]
     pub body_contains: Option<serde_yaml::Value>,
+    /// Assert the response arrived within this many milliseconds (latency SLO).
+    #[serde(default, rename = "max_ms")]
+    pub max_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,6 +261,9 @@ pub struct ScenarioSpec {
     /// Optional cap on messages/second per producer (0/absent = as fast as able).
     #[serde(default, rename = "rate_per_sec")]
     pub rate_per_sec: Option<u32>,
+    /// Assert the achieved produce throughput was at least this many msgs/second.
+    #[serde(default, rename = "expect_throughput_per_sec")]
+    pub expect_throughput_per_sec: Option<u32>,
 }
 
 /// The Kafka target + message template for a [`ScenarioSpec`]. The `key` and
@@ -426,6 +432,140 @@ pub struct AuthApiKey {
     pub value: String,
 }
 
+/// An **external / upstream** service the app under test calls out to but that
+/// noworries does NOT stand up (a partner sandbox API, an auth server, ...).
+/// noworries injects its URL and credentials into the app's environment so the
+/// app can reach it, both under the app's own env-var names (`env`, `url_env`,
+/// per-auth `*_env`) and under conventional `NOWORRIES_EXTERNAL_<NAME>_*` names.
+/// All string values support `${VAR}` interpolation, so secrets live in the
+/// gitignored `.noworries.env` and are prompted for when missing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSpec {
+    /// Logical name; drives the conventional env-var prefix
+    /// (`NOWORRIES_EXTERNAL_<NAME>_*`, uppercased, non-alphanumerics → `_`).
+    pub name: String,
+    /// The (sandbox) base URL the app should call.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Also expose the URL under this app-specific env var (e.g. `PAYMENTS_BASE_URL`).
+    #[serde(default, rename = "url_env")]
+    pub url_env: Option<String>,
+    /// Extra literal env vars to set for this dependency (values interpolate `${VAR}`).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Credentials for the dependency, materialized into env vars.
+    #[serde(default)]
+    pub auth: Option<ExternalAuth>,
+    /// Stand up an in-process **mock** of this dependency instead of pointing at a
+    /// real sandbox: noworries serves the `stubs` on a local port, injects that
+    /// URL as the external's URL, and records every request the app makes so
+    /// checks can assert on them via `external_calls`.
+    #[serde(default)]
+    pub mock: Option<MockSpec>,
+}
+
+/// In-process mock of an external dependency.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MockSpec {
+    /// Response rules, matched top-to-bottom; the first match wins. An unmatched
+    /// request still gets recorded and answered with 200 (empty body).
+    #[serde(default)]
+    pub stubs: Vec<MockStub>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MockStub {
+    #[serde(rename = "when")]
+    pub when_: MockWhen,
+    #[serde(default)]
+    pub respond: MockRespond,
+}
+
+/// Match condition for a [`MockStub`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MockWhen {
+    /// HTTP method to match (case-insensitive); omit to match any.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Request path to match exactly (query string ignored).
+    pub path: String,
+}
+
+/// Canned response for a [`MockStub`].
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MockRespond {
+    /// HTTP status to return (default 200).
+    #[serde(default)]
+    pub status: Option<u16>,
+    /// JSON body to return (a plain string is sent as-is).
+    #[serde(default)]
+    pub body: Option<serde_yaml::Value>,
+    /// Extra response headers.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Auth for an [`ExternalSpec`]. Set the one style the dependency uses. Each
+/// materializes both the raw parts and a ready-to-send header value.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalAuth {
+    #[serde(default)]
+    pub basic: Option<ExternalBasic>,
+    #[serde(default)]
+    pub bearer: Option<ExternalBearer>,
+    #[serde(default)]
+    pub api_key: Option<ExternalApiKey>,
+}
+
+/// Basic auth. Sets `_USER`/`_PASSWORD` (raw) and `_AUTHORIZATION` =
+/// `Basic base64(user:pass)`. Optional `*_env` also aliases to app-specific names.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalBasic {
+    pub username: String,
+    pub password: String,
+    #[serde(default, rename = "username_env")]
+    pub username_env: Option<String>,
+    #[serde(default, rename = "password_env")]
+    pub password_env: Option<String>,
+    /// App-specific env var to also receive the ready `Basic ...` header value.
+    #[serde(default, rename = "header_env")]
+    pub header_env: Option<String>,
+}
+
+/// Bearer/token auth. Sets `_TOKEN` (raw) and `_AUTHORIZATION` = `<scheme> <token>`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalBearer {
+    pub token: String,
+    /// Scheme prefix for the header value (default `Bearer`; empty = raw token).
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default, rename = "token_env")]
+    pub token_env: Option<String>,
+    #[serde(default, rename = "header_env")]
+    pub header_env: Option<String>,
+}
+
+/// API-key auth. Sets `_API_KEY` (raw value) and `_API_KEY_HEADER` (the header
+/// name the app should use, default `X-API-Key`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalApiKey {
+    pub value: String,
+    /// The HTTP header name the app should send the key in (default `X-API-Key`).
+    #[serde(default)]
+    pub header: Option<String>,
+    #[serde(default, rename = "value_env")]
+    pub value_env: Option<String>,
+}
+
 /// MySQL assertion. `seed` statements run BEFORE the request (to set up data);
 /// `query` + `expect_row`/`expect_row_count` verify state afterwards. This is
 /// the "seed data -> hit the API -> check what changed" flow.
@@ -509,6 +649,210 @@ pub struct CheckSpec {
     /// Optional edge-case load/timing scenario driving the trigger phase.
     #[serde(default)]
     pub scenario: Option<ScenarioSpec>,
+    /// Assertions against the app's captured log (`.noworries/app.log`).
+    #[serde(default)]
+    pub logs: Option<LogAssertion>,
+    /// Assert the app called a mocked external during this check.
+    #[serde(default, rename = "external_calls")]
+    pub external_calls: Vec<ExternalCallAssertion>,
+    // --- extensible assertion types (see src/checks/) ---
+    #[serde(default)]
+    pub graphql: Option<GraphqlAssertion>,
+    #[serde(default)]
+    pub metrics: Option<MetricsAssertion>,
+    #[serde(default)]
+    pub snapshot: Option<SnapshotAssertion>,
+    #[serde(default)]
+    pub schema: Option<SchemaAssertion>,
+    #[serde(default)]
+    pub sse: Option<SseAssertion>,
+    #[serde(default)]
+    pub websocket: Option<WebsocketAssertion>,
+    #[serde(default)]
+    pub grpc: Option<GrpcAssertion>,
+    #[serde(default)]
+    pub traces: Option<TracesAssertion>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// GraphQL query/mutation over HTTP POST; asserts on `data` and `errors`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlAssertion {
+    /// Endpoint path (relative to the app) or absolute URL. Default `/graphql`.
+    #[serde(default = "default_graphql_path")]
+    pub path: String,
+    pub query: String,
+    #[serde(default)]
+    pub variables: Option<serde_yaml::Value>,
+    /// Deep-subset match against the response `data`.
+    #[serde(default)]
+    pub expect_data: Option<serde_yaml::Value>,
+    /// Fail if the response has a non-empty `errors` array (default true).
+    #[serde(default = "default_true")]
+    pub expect_no_errors: bool,
+}
+
+fn default_graphql_path() -> String {
+    "/graphql".to_string()
+}
+
+/// Prometheus metric assertion: scrape a metrics endpoint, match one series,
+/// and compare its value.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsAssertion {
+    /// Metrics endpoint path or absolute URL. Default `/metrics`.
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+    /// Metric name (e.g. `http_server_requests_seconds_count`).
+    pub metric: String,
+    /// Labels the series must have (subset match).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    /// Comparison: `">= 1"`, `"== 3"`, `"<= 5"`, `"> 0"`, `"< 10"`, `"= 2"`.
+    /// Omit to just assert the series is present.
+    #[serde(default)]
+    pub expect: Option<String>,
+}
+
+fn default_metrics_path() -> String {
+    "/metrics".to_string()
+}
+
+/// Golden-file assertion on the check's HTTP `request` response body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotAssertion {
+    /// Golden file path (relative to the project dir).
+    pub file: String,
+    /// JSON paths to blank out before comparing (volatile fields like ids/times).
+    #[serde(default)]
+    pub ignore: Vec<String>,
+}
+
+/// Postgres schema assertion: check a table's columns.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SchemaAssertion {
+    pub table: String,
+    /// DB schema (default `public`).
+    #[serde(default)]
+    pub schema: Option<String>,
+    /// Expected `column -> data_type` (subset; type compared loosely).
+    #[serde(default)]
+    pub columns: BTreeMap<String, String>,
+    /// Columns that must exist (type unchecked).
+    #[serde(default, rename = "has_columns")]
+    pub has_columns: Vec<String>,
+}
+
+/// Server-Sent-Events assertion: read an event stream until a matching event.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SseAssertion {
+    /// Stream path (relative to the app) or absolute URL.
+    pub path: String,
+    /// Deep-subset match against an event's `data` (parsed as JSON).
+    pub contains: serde_yaml::Value,
+    #[serde(default, rename = "timeout_ms")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// WebSocket assertion: connect, optionally send a message, await a match.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebsocketAssertion {
+    /// `ws://`/`wss://` URL, or a relative path (→ `ws://127.0.0.1:<app>`).
+    pub url: String,
+    /// Message to send on connect (JSON; a plain string is sent as text).
+    #[serde(default)]
+    pub send: Option<serde_yaml::Value>,
+    /// Deep-subset match against a received message (parsed as JSON).
+    #[serde(default, rename = "expect_message")]
+    pub expect_message: serde_yaml::Value,
+    #[serde(default, rename = "timeout_ms")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// gRPC assertion via `grpcurl` (shelled out). Requires `grpcurl` on PATH and
+/// server reflection, or explicit `protos`/`import_paths`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcAssertion {
+    /// `host:port` (supports `${VAR}`).
+    pub target: String,
+    /// Fully-qualified method: `package.Service/Method`.
+    pub method: String,
+    /// Request message as JSON.
+    #[serde(default)]
+    pub data: Option<serde_yaml::Value>,
+    /// Deep-subset match against the response JSON.
+    #[serde(default)]
+    pub expect_contains: Option<serde_yaml::Value>,
+    /// Use plaintext (no TLS). Default true.
+    #[serde(default = "default_true")]
+    pub plaintext: bool,
+    /// `-import-path` args for grpcurl (when not using reflection).
+    #[serde(default)]
+    pub import_paths: Vec<String>,
+    /// `-proto` files for grpcurl (when not using reflection).
+    #[serde(default)]
+    pub protos: Vec<String>,
+}
+
+/// OpenTelemetry trace assertion: query a Jaeger/Tempo-compatible HTTP API and
+/// assert matching traces exist.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TracesAssertion {
+    /// Trace-query URL (e.g. Jaeger `http://127.0.0.1:16686/api/traces`).
+    pub query_url: String,
+    /// Service name to query.
+    pub service: String,
+    /// Optional operation/span name filter.
+    #[serde(default)]
+    pub operation: Option<String>,
+    /// Span tags that must match (subset).
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    /// Minimum number of matching traces required (default 1).
+    #[serde(default, rename = "min_count")]
+    pub min_count: Option<usize>,
+}
+
+/// Assertions against the app's captured stdout/stderr log.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LogAssertion {
+    /// Substrings that must ALL appear in the log.
+    #[serde(default)]
+    pub contains: Vec<String>,
+    /// Substrings that must NOT appear (e.g. `ERROR`, `Exception`).
+    #[serde(default)]
+    pub absent: Vec<String>,
+}
+
+/// Assert the app made a matching request to a mocked external.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalCallAssertion {
+    /// Which external's mock to inspect (matches `externals[].name`).
+    pub external: String,
+    /// HTTP method to match (case-insensitive); omit to match any.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Request path to match exactly.
+    pub path: String,
+    /// Deep-subset match against the recorded request's JSON body.
+    #[serde(default)]
+    pub body_contains: Option<serde_yaml::Value>,
+    /// Exact number of matching calls required; omit for "at least one".
+    #[serde(default)]
+    pub times: Option<usize>,
 }
 
 /// Raw shape as it appears on disk (services are strings here).
@@ -522,6 +866,10 @@ struct RawSpec {
     #[serde(default)]
     flink: Option<FlinkSpec>,
     #[serde(default)]
+    externals: Vec<ExternalSpec>,
+    #[serde(default)]
+    setup: Vec<String>,
+    #[serde(default)]
     auth: Option<AuthSpec>,
     #[serde(default)]
     checks: Vec<CheckSpec>,
@@ -534,6 +882,11 @@ pub struct NoworriesSpec {
     pub services: Vec<ServiceDecl>,
     pub app: Option<AppSpec>,
     pub flink: Option<FlinkSpec>,
+    pub externals: Vec<ExternalSpec>,
+    /// Shell commands run (with the app's env wiring) after infra is healthy and
+    /// before the app starts — for DB migrations / fixtures (Flyway, Liquibase,
+    /// Prisma, Alembic, raw SQL, …).
+    pub setup: Vec<String>,
     pub auth: Option<AuthSpec>,
     pub checks: Vec<CheckSpec>,
 }
@@ -568,11 +921,18 @@ impl NoworriesSpec {
                 }
             }
         }
+        for e in &raw.externals {
+            if e.name.trim().is_empty() {
+                bail!("{SPEC_FILENAME}: every external needs a non-empty \"name\".");
+            }
+        }
         Ok(NoworriesSpec {
             version: 1,
             services,
             app: raw.app,
             flink: raw.flink,
+            externals: raw.externals,
+            setup: raw.setup,
             auth: raw.auth,
             checks: raw.checks,
         })
@@ -733,6 +1093,55 @@ checks:
     fn flink_requires_at_least_one_job() {
         let yaml = "version: 1\nservices: [kafka]\nflink:\n  jobs: []\n";
         assert!(NoworriesSpec::parse(yaml).is_err());
+    }
+
+    #[test]
+    fn logs_setup_latency_throughput_mock_parse() {
+        let yaml = r#"
+version: 1
+services: [postgres, kafka]
+setup:
+  - "./mvnw -q flyway:migrate"
+  - "psql -f fixtures.sql"
+externals:
+  - name: payments
+    mock:
+      stubs:
+        - when: { method: POST, path: /charge }
+          respond: { status: 201, body: { id: "ch_1" }, headers: { X-Trace: "t" } }
+checks:
+  - name: "fast + logged + called"
+    request: { method: POST, path: /orders, body: { sku: "A" } }
+    expect: { status: 201, max_ms: 300 }
+    logs: { contains: ["OrderCreated"], absent: ["ERROR", "Exception"] }
+    external_calls:
+      - external: payments
+        method: POST
+        path: /charge
+        body_contains: { amount: 100 }
+        times: 1
+  - name: "burst throughput"
+    scenario:
+      kind: burst
+      count: 100
+      expect_throughput_per_sec: 500
+      kafka: { topic: t, message: { id: "${seq}" } }
+"#;
+        let spec = NoworriesSpec::parse(yaml).unwrap();
+        assert_eq!(spec.setup.len(), 2);
+        let ext = &spec.externals[0];
+        let mock = ext.mock.as_ref().unwrap();
+        assert_eq!(mock.stubs[0].when_.path, "/charge");
+        assert_eq!(mock.stubs[0].respond.status, Some(201));
+        let c0 = &spec.checks[0];
+        assert_eq!(c0.expect.as_ref().unwrap().max_ms, Some(300));
+        let logs = c0.logs.as_ref().unwrap();
+        assert_eq!(logs.contains, vec!["OrderCreated"]);
+        assert_eq!(logs.absent, vec!["ERROR", "Exception"]);
+        assert_eq!(c0.external_calls[0].path, "/charge");
+        assert_eq!(c0.external_calls[0].times, Some(1));
+        let sc = spec.checks[1].scenario.as_ref().unwrap();
+        assert_eq!(sc.expect_throughput_per_sec, Some(500));
     }
 
     #[test]

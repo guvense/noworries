@@ -71,12 +71,21 @@ Baked-in Postgres/MySQL credentials are `noworries` / `noworries` / `noworries`
 resolves to the last one wired — pick per-part vars (`PGHOST` vs `MYSQL_HOST`) to
 disambiguate.
 
+**External dependencies.** Any [`externals`](configuration.md#externals-optional)
+the app calls out to (a partner sandbox, a separate auth server) are also injected
+into the app's environment here — the sandbox URL plus credential env vars
+(`NOWORRIES_EXTERNAL_<NAME>_*` and any app-specific `*_env` names you set), with
+`${VAR}` secrets resolved from `.noworries.env`. noworries doesn't stand these
+services up; it only hands the app the URL + credentials so the app's own code can
+reach them.
+
 The runner then waits for the app's health endpoint and executes the selected
 checks — see [checks](checks.md).
 
 ## 4. Tear down
 
-- The app process group is stopped (SIGTERM → SIGKILL).
+- The app's whole process tree is stopped (Unix: SIGTERM → SIGKILL on the
+  process group; Windows: `taskkill /T /F`).
 - `docker compose down -v` removes containers, the network, and volumes.
 - Teardown is guaranteed: it runs on success, on failure, on Ctrl-C/SIGTERM, and
   when the hard `--timeout` fires. `--keep-alive` skips container teardown (but

@@ -145,6 +145,89 @@ Configure your job to read those hostnames (either hard-coded, or from the
 injected `NOWORRIES_*` env vars). First run is slow — the `flink` image (~600MB)
 plus your services pull; use `--timeout 600`.
 
+## `setup` (optional)
+
+Shell commands run **after infra is healthy and before the app starts**, with the
+same environment the app gets (DB URLs, `externals`, `app.env`). Use it for
+migrations and fixtures — Flyway, Liquibase, Prisma, Alembic, raw `psql`, seed
+scripts. A non-zero exit aborts the run.
+
+```yaml
+setup:
+  - "./mvnw -q flyway:migrate"
+  - "psql \"$DATABASE_URL\" -f fixtures/seed.sql"
+```
+
+Runs on the platform shell (`sh -c` on Unix, `cmd /C` on Windows).
+
+## `externals` (optional)
+
+For an **upstream/third-party service the app calls out to** but that noworries
+does **not** stand up — a partner sandbox API, a separate auth server, a payment
+gateway. noworries injects its URL and credentials into the app's environment so
+the app can reach it during the run. This is different from `services` (which
+noworries containerizes) and from `auth` (which authenticates noworries → app):
+`externals` is app → upstream.
+
+```yaml
+externals:
+  - name: payments               # drives the conventional env prefix
+    url: "https://sandbox.pay.example.com"
+    url_env: PAYMENTS_BASE_URL    # optional: also expose the URL under your app's name
+    env:                          # optional: extra literal env (values interpolate ${VAR})
+      PAYMENTS_TIMEOUT_MS: "5000"
+    auth:                         # optional: basic | bearer | api_key
+      basic:
+        username: "${PAY_USER}"           # secret -> .noworries.env, prompted if missing
+        password: "${PAY_PASS}"
+        username_env: PAYMENTS_USERNAME    # optional app-specific aliases
+        password_env: PAYMENTS_PASSWORD
+        header_env: PAYMENTS_AUTHORIZATION # gets "Basic base64(user:pass)"
+      # bearer: { token: "${PAY_TOKEN}", scheme: Bearer, token_env: PAYMENTS_TOKEN, header_env: PAYMENTS_AUTHORIZATION }
+      # api_key: { value: "${PAY_KEY}", header: X-Api-Key, value_env: PAYMENTS_API_KEY }
+```
+
+Every external always sets **conventional** vars, and — where you provide the
+app-specific names — those too (so no app config change is needed):
+
+| Declared | Conventional vars set | Also set when you name them |
+| -------- | --------------------- | --------------------------- |
+| `url`    | `NOWORRIES_EXTERNAL_<NAME>_URL` | `url_env` |
+| `basic`  | `…_USER`, `…_PASSWORD`, `…_AUTHORIZATION` (= `Basic base64(u:p)`) | `username_env`, `password_env`, `header_env` |
+| `bearer` | `…_TOKEN`, `…_AUTHORIZATION` (= `<scheme> <token>`) | `token_env`, `header_env` |
+| `api_key`| `…_API_KEY`, `…_API_KEY_HEADER` (header name) | `value_env` |
+| `env`    | (your literal keys, verbatim) | — |
+
+`<NAME>` is the external's `name` uppercased with non-alphanumerics turned into
+`_` (`payments-v2` → `PAYMENTS_V2`). All values interpolate `${VAR}` from
+`.noworries.env` / the process env, so credentials stay out of the repo and are
+prompted for when missing (see below). External vars sit **above** the framework
+service wiring but **below** `app.env`, so an explicit `app.env` entry still wins.
+
+### Mocking an external (`mock`)
+
+Instead of pointing at a real sandbox, noworries can stand up an **in-process
+mock** of the external: it serves canned responses and **records every request**
+the app makes, so a check can assert the app actually called it (see
+`external_calls` in [checks](checks.md#external-calls)). The mock's URL overrides
+the external's `url` — the app calls the mock with no code change.
+
+```yaml
+externals:
+  - name: payments
+    url_env: PAYMENTS_BASE_URL      # the mock's URL is injected here (and conventionally)
+    mock:
+      stubs:
+        - when: { method: POST, path: /charge }
+          respond: { status: 201, body: { id: "ch_1", status: "ok" } }
+        - when: { path: /health }   # method omitted = any
+          respond: { status: 200 }
+```
+
+Stubs match top-to-bottom, first match wins (exact `path`, query ignored; `method`
+optional). An unmatched request is still recorded and answered `200`. `respond`:
+`status` (default 200), `body` (JSON), `headers`.
+
 ## `auth` (optional)
 
 Authentication applied to **every** check's HTTP request. Extensible — set the

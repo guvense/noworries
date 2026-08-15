@@ -179,6 +179,7 @@ mod tests {
             concurrency,
             keys,
             rate_per_sec: None,
+            expect_throughput_per_sec: None,
         }
     }
 

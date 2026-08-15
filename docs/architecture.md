@@ -18,7 +18,13 @@ src/
   edgecases/
     mod.rs           EdgeCase trait + registry + templating (interface only)
     burst.rs / concurrent.rs / duplicates.rs / out_of_order.rs  ← add a scenario here
+  checks/
+    mod.rs           Assertion trait + registry + shared helpers (interface only)
+    graphql.rs / metrics.rs / snapshot.rs / schema.rs / sse.rs / websocket.rs / grpc.rs / traces.rs  ← add a check type here
   flink.rs           Flink session-cluster compose + REST job submission
+  externals.rs       upstream-dependency env injection (sandbox URL + credentials)
+  mock.rs            in-process mock servers for externals (stub + record requests)
+  reports.rs         JUnit XML + HTML report formats
   compose.rs         compose.test.yml generation
   lifecycle.rs       up / health / port-resolve / teardown (docker compose)
   app.rs             start the app subprocess, wire env, wait for health
@@ -96,6 +102,24 @@ pub trait EdgeCase {
 strategy only builds the plan (pure, unit-testable); the runner owns execution
 (threads, producers, rate limiting) and the check's observe assertions verify the
 invariant. Kafka is the first sink; the plan/action shape leaves room for others.
+
+### `Assertion` (`src/checks/`)
+
+Newer protocol / observability check types (`graphql`, `metrics`, `snapshot`,
+`schema`, `sse`, `websocket`, `grpc`, `traces`) plug in here without touching the
+runner's core loop:
+
+```rust
+pub trait Assertion {
+    fn run(&self, check: &CheckSpec, ctx: &RunnerContext, retry: Duration) -> Vec<AssertionResult>;
+}
+```
+
+Each impl inspects its own optional field on `CheckSpec` (returning an empty vec
+when absent) and lives in its own file. **Adding a check type** is a new field on
+`CheckSpec`, a new file in `src/checks/`, and one line in `checks::registry()`.
+The runner calls `checks::run_all` after the built-in assertions. (The original
+http/db/kafka assertions remain in the runner; new ones use this trait.)
 
 ### Flink (`src/flink.rs`)
 

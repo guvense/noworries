@@ -18,7 +18,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -198,9 +197,7 @@ pub fn submit_all(
 }
 
 fn run_build(dir: &Path, build: &str) -> Result<()> {
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(build)
+    let status = crate::app::shell_command(build)
         .current_dir(dir)
         .status()
         .with_context(|| format!("running build command: {build}"))?;

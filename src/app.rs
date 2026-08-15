@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -34,28 +35,68 @@ impl StartedApp {
         self.pid
     }
 
-    /// Stop the app's process group (SIGTERM, then SIGKILL). Idempotent.
+    /// Stop the app's whole process tree (SIGTERM → SIGKILL on Unix;
+    /// `taskkill /T /F` on Windows). Idempotent.
     pub fn stop(&mut self) {
         if self.stopped {
             return;
         }
         self.stopped = true;
+        kill_tree(self.pid);
+    }
+}
+
+/// Build a [`Command`] that runs `command` through the platform shell, so
+/// `app.start` / a Flink `build` / a setup hook can be an ordinary shell
+/// one-liner on any OS.
+pub fn shell_command(command: &str) -> Command {
+    #[cfg(unix)]
+    {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(command);
+        c
+    }
+}
+
+/// Terminate the app's entire process tree (e.g. `mvnw` → JVM, `npm` → node).
+///
+/// - **Unix:** the child is its own process-group leader, so signal the whole
+///   group — SIGTERM, wait briefly for a clean exit, then SIGKILL.
+/// - **Windows:** `taskkill /T /F` kills the process and all its descendants.
+pub fn kill_tree(pid: i32) {
+    #[cfg(unix)]
+    {
         unsafe {
             // Negative pid signals the whole process group (we spawned as leader).
-            libc::kill(-self.pid, libc::SIGTERM);
+            libc::kill(-pid, libc::SIGTERM);
         }
         for _ in 0..10 {
-            if !process_group_alive(self.pid) {
+            if !process_group_alive(pid) {
                 return;
             }
             sleep(Duration::from_millis(300));
         }
         unsafe {
-            libc::kill(-self.pid, libc::SIGKILL);
+            libc::kill(-pid, libc::SIGKILL);
         }
+    }
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
+#[cfg(unix)]
 fn process_group_alive(pid: i32) -> bool {
     // kill(-pid, 0) returns 0 while any member of the group exists.
     unsafe { libc::kill(-pid, 0) == 0 }
@@ -68,17 +109,27 @@ pub fn pick_free_port() -> Result<u16> {
 }
 
 /// Build the environment for the app: its port plus the framework's wiring for
-/// every resolved service endpoint (falling back to generic vars).
+/// every resolved service endpoint (falling back to generic vars). `vars` is the
+/// `${VAR}` lookup env (`.noworries.env` + process env) used to interpolate
+/// `app.env` values, so secrets referenced there resolve just like everywhere else.
 pub fn build_env(
     app: Option<&AppSpec>,
     fw: Option<&dyn Framework>,
     endpoints: &[ServiceEndpoint],
+    extra_env: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
     port: u16,
 ) -> BTreeMap<String, String> {
     let mut env = match fw {
         Some(f) => f.env_wiring(endpoints),
         None => framework::generic_env(endpoints),
     };
+    // External/upstream dependency wiring (URLs + credentials) sits above the
+    // framework's service wiring but below `app.env`, so an explicit `app.env`
+    // entry can still override it.
+    for (k, v) in extra_env {
+        env.insert(k.clone(), v.clone());
+    }
     // Precedence: explicit app.port_env > the framework's convention > generic
     // default. Node/FastAPI/Go read `PORT`; Spring Boot reads `SERVER_PORT`.
     let port_env = app
@@ -88,7 +139,9 @@ pub fn build_env(
     env.insert(port_env, port.to_string());
     if let Some(a) = app {
         for (k, v) in &a.env {
-            env.insert(k.clone(), v.clone());
+            // Interpolate ${VAR} so `app.env: { X: "${SECRET}" }` resolves from
+            // .noworries.env / the process env instead of reaching the app literal.
+            env.insert(k.clone(), crate::runner::interpolate(v, vars));
         }
     }
     env
@@ -151,16 +204,19 @@ pub fn resolve_start_command(
 
 /// Launch the app and wait until ready. On failure (early exit or timeout) the
 /// process is stopped before returning the error.
+#[allow(clippy::too_many_arguments)]
 pub fn start_app(
     app: Option<&AppSpec>,
     fw: Option<&dyn Framework>,
     dir: &Path,
     endpoints: &[ServiceEndpoint],
+    extra_env: &BTreeMap<String, String>,
+    vars: &BTreeMap<String, String>,
     out_dir: &Path,
 ) -> Result<StartedApp> {
     let command = resolve_start_command(app, fw, dir)?;
     let port = pick_free_port()?;
-    let env = build_env(app, fw, endpoints, port);
+    let env = build_env(app, fw, endpoints, extra_env, vars, port);
     let health_path = app
         .and_then(|a| a.health.clone())
         .or_else(|| fw.map(|f| f.default_health_path().to_string()));
@@ -172,18 +228,18 @@ pub fn start_app(
     let log = File::create(&log_path)?;
     let log_err = log.try_clone()?;
 
-    // process_group(0) makes the child its own group leader so we can signal the
-    // whole tree (e.g. mvnw -> JVM child) at teardown.
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .current_dir(dir)
+    // Start via the platform shell so `app.start` can be a shell one-liner.
+    let mut cmd = shell_command(&command);
+    cmd.current_dir(dir)
         .envs(&env)
-        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()?;
+        .stderr(Stdio::from(log_err));
+    // Unix: make the child its own process-group leader so we can signal the
+    // whole tree (mvnw -> JVM) at teardown. Windows: `taskkill /T` walks the tree.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
 
     let pid = child.id() as i32;
     let log_path_str = log_path.to_string_lossy().to_string();
@@ -243,4 +299,24 @@ pub fn start_app(
     }
 
     Ok(started)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::AppSpec;
+
+    #[test]
+    fn app_env_interpolates_from_vars() {
+        let mut app = AppSpec::default();
+        app.env.insert("API_KEY".into(), "${SECRET}".into());
+        app.env.insert("PLAIN".into(), "literal".into());
+        let mut vars = BTreeMap::new();
+        vars.insert("SECRET".into(), "s3cret".into());
+
+        let env = build_env(Some(&app), None, &[], &BTreeMap::new(), &vars, 8080);
+        assert_eq!(env.get("API_KEY").map(String::as_str), Some("s3cret"));
+        assert_eq!(env.get("PLAIN").map(String::as_str), Some("literal"));
+        assert_eq!(env.get("SERVER_PORT").map(String::as_str), Some("8080"));
+    }
 }

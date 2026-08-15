@@ -1,6 +1,6 @@
 {
   "name": "@guvenseckin4/noworries",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Ephemeral infra harness that lets an AI verify the changes it just made — Postgres/MySQL/Mongo/Redis/Kafka/Elasticsearch + Flink pipelines, Spring/Go/FastAPI/Node, and the /noworries Claude Code command.",
   "bin": {
     "noworries": "bin/cli.js"
@@ -15,7 +15,8 @@
   ],
   "os": [
     "darwin",
-    "linux"
+    "linux",
+    "win32"
   ],
   "cpu": [
     "x64",

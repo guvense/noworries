@@ -18,6 +18,7 @@ function target() {
   if (p === "darwin" && a === "arm64") return "aarch64-apple-darwin";
   if (p === "darwin" && a === "x64") return "x86_64-apple-darwin";
   if (p === "linux" && a === "x64") return "x86_64-unknown-linux-gnu";
+  if (p === "win32" && a === "x64") return "x86_64-pc-windows-msvc";
   return null;
 }
 
@@ -61,10 +62,11 @@ async function main() {
   console.log(`noworries: downloading ${asset} (v${version})…`);
   try {
     await download(url, tarball);
-    // tar is available on macOS and Linux (and modern Windows).
+    // tar is available on macOS, Linux, and modern Windows (bsdtar).
     execFileSync("tar", ["-xzf", tarball, "-C", __dirname], { stdio: "inherit" });
-    const bin = path.join(__dirname, "noworries");
-    fs.chmodSync(bin, 0o755);
+    const binName = process.platform === "win32" ? "noworries.exe" : "noworries";
+    const bin = path.join(__dirname, binName);
+    if (process.platform !== "win32") fs.chmodSync(bin, 0o755);
     console.log("noworries: installed. Run `noworries install-command` to add the /noworries slash command.");
   } catch (e) {
     console.error(`noworries: install failed: ${e.message}`);

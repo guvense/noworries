@@ -65,6 +65,8 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -79,8 +81,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Windows produces noworries.exe; every platform ships a .tar.gz
+          # (bsdtar is available on the windows-latest runner).
+          bin="noworries"
+          case "${{ matrix.target }}" in
+            *windows*) bin="noworries.exe" ;;
+          esac
           out="noworries-${{ matrix.target }}.tar.gz"
-          tar -czf "$out" -C "target/${{ matrix.target }}/release" noworries
+          tar -czf "$out" -C "target/${{ matrix.target }}/release" "$bin"
           if command -v shasum >/dev/null 2>&1; then
             shasum -a 256 "$out" > "$out.sha256"
           else
@@ -108,7 +116,7 @@ jobs:
     # OIDC "trusted publishing" — no NPM_TOKEN, works with account 2FA.
     # Requires: (1) the package already exists on npm, and (2) a trusted
     # publisher configured on the package (repo guvense/noworries, workflow
-    # release.yml). Do the very first publish manually (see docs/releasing.md).
+    # release.yml). Do the very first publish manually, then CI takes over.
     permissions:
       id-token: write
       contents: read

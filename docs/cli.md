@@ -24,6 +24,9 @@ noworries [OPTIONS] [COMMAND]
 | `--keep-alive`    | off       | Leave containers running after the run (for debugging). |
 | `--timeout N`     | `180`     | Hard cap on the whole run, in seconds. |
 | `--json`          | off       | Also print the results summary as JSON on stdout. |
+| `--junit <path>`  | off       | Write a JUnit XML report (one test case per check) for CI. |
+| `--html <path>`   | off       | Write a self-contained HTML results report. |
+| `--update-snapshots` | off    | Write/refresh `snapshot` golden files instead of failing on a diff. |
 | `--dir <path>`    | `.`       | Project directory. |
 
 ## Exit codes
