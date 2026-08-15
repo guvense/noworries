@@ -731,6 +731,36 @@ fn kafka_send_retry(
 /// How long to wait for a just-auto-created topic to become usable.
 const KAFKA_TOPIC_READY_SECS: u64 = 20;
 
+/// Ensure `topic` exists with an elected leader, triggering broker-side
+/// auto-creation. This is required because the kafka crate's Producer/Consumer
+/// **silently skip** unknown topics and never cause auto-creation — only an
+/// explicit `KafkaClient::load_metadata(&[topic])` does (per the crate docs).
+/// Without this, producing to a fresh topic fails forever with
+/// `UnknownTopicOrPartition` (the CI failure).
+fn kafka_ensure_topic(host: &str, topic: &str, deadline: Instant) -> std::result::Result<(), String> {
+    use kafka::client::KafkaClient;
+    let mut client = KafkaClient::new(vec![host.to_string()]);
+    loop {
+        // Requesting metadata for this specific topic auto-creates it on the
+        // broker (when auto-create is enabled) and elects a leader.
+        let _ = client.load_metadata(&[topic]);
+        let ready = client
+            .topics()
+            .partitions(topic)
+            .map(|p| !p.available_ids().is_empty())
+            .unwrap_or(false);
+        if ready {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "topic \"{topic}\" never became available — is `auto.create.topics.enable` on?"
+            ));
+        }
+        sleep(Duration::from_millis(500));
+    }
+}
+
 /// Produce the message declared by a check to its topic — used to trigger a
 /// consumer the feature under test added. The DB/redis assertion in the same
 /// check verifies the effect.
@@ -752,11 +782,13 @@ fn kafka_produce(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<Assertion
     let payload = yaml_to_bytes(&produce.message);
     let result = (|| -> anyhow::Result<()> {
         use kafka::producer::{Producer, RequiredAcks};
+        let deadline = Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS);
+        // Auto-create the topic (the Producer won't) before producing.
+        kafka_ensure_topic(&host, &produce.topic, deadline).map_err(|e| anyhow::anyhow!(e))?;
         let mut producer = Producer::from_hosts(vec![host.clone()])
             .with_ack_timeout(Duration::from_secs(5))
             .with_required_acks(RequiredAcks::One)
             .create()?;
-        let deadline = Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS);
         kafka_send_retry(
             &mut producer,
             &produce.topic,
@@ -1028,6 +1060,18 @@ fn produce_plan(
     let sent = AtomicUsize::new(0);
     let delay = Duration::from_millis(plan.per_message_delay_ms);
 
+    // Auto-create every distinct topic once (the Producer won't) before the
+    // producer threads flood it, so the first sends don't hit UnknownTopic.
+    let deadline = Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS);
+    let mut topics: Vec<&str> = plan.actions.iter().map(|a| a.topic.as_str()).collect();
+    topics.sort_unstable();
+    topics.dedup();
+    for topic in topics {
+        if let Err(e) = kafka_ensure_topic(host, topic, deadline) {
+            return Err((0, e));
+        }
+    }
+
     let result = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for t in 0..concurrency {
@@ -1112,6 +1156,11 @@ fn kafka_expect(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionR
     let found = (|| -> anyhow::Result<bool> {
         use kafka::consumer::{Consumer, FetchOffset, GroupOffsetStorage};
         let deadline = Instant::now() + timeout;
+        // Make sure the topic exists (auto-create) before subscribing, so a
+        // consumer-only check doesn't fail just because nothing produced yet.
+        let ensure_deadline =
+            Instant::now() + Duration::from_secs(KAFKA_TOPIC_READY_SECS).min(timeout.max(Duration::from_secs(5)));
+        kafka_ensure_topic(&host, &expect.topic, ensure_deadline).map_err(|e| anyhow::anyhow!(e))?;
         // Build the consumer, retrying while a just-created topic propagates.
         let mut consumer = loop {
             match Consumer::from_hosts(vec![host.clone()])
