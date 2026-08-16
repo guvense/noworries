@@ -716,6 +716,22 @@ fn run_checks_flow(
     // Stand up the Flink pipeline (build + submit jobs) if this run tests one.
     // Jobs must be RUNNING before checks trigger the pipeline.
     if let Some(fs) = &spec.flink {
+        // Flink's KafkaSource won't auto-create source topics — pre-create the
+        // topics the checks reference (plus any in `flink.topics`) so the job's
+        // `describeTopics` finds them instead of hard-failing at startup.
+        if spec.services.iter().any(|s| s.kind.as_str() == "kafka") {
+            let topics = flink::referenced_topics(fs, selected);
+            if !topics.is_empty() {
+                let ensured = flink::ensure_kafka_topics(
+                    &handles.compose_file,
+                    &handles.project_name,
+                    &topics,
+                );
+                if !ensured.is_empty() {
+                    report::ok(&format!("ensured Kafka topic(s): {}", ensured.join(", ")));
+                }
+            }
+        }
         match handles.aux_ports.get(flink::JOBMANAGER) {
             Some(&rest_port) => {
                 report::info("");

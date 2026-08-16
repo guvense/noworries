@@ -42,6 +42,7 @@ fn submits_example_job_and_reaches_running() {
         taskmanagers: None,
         slots: None,
         submit_timeout: Some(120),
+        topics: vec![],
         jobs: vec![FlinkJob {
             name: Some("example".to_string()),
             build: None,

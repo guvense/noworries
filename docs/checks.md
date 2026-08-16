@@ -271,8 +271,19 @@ checks".
 - `doc_id` + `expect_exists` / `expect_source_contains` — GET the document and
   deep-subset match its `_source`.
 - `query` + `expect_hits` — POST a search with your query DSL and assert the hit
-  count.
-- Verification retries briefly for near-real-time / async writes.
+  count. noworries issues a `_refresh` on the index **before each search**, so a
+  write made by the app or a downstream sink (e.g. a Flink job) is visible
+  immediately instead of racing the default 1s refresh interval.
+- A `template` on its own is a valid check: noworries asserts the template
+  installed (a template-only check no longer fails as "no assertions").
+- Verification retries within the check's budget for near-real-time / async
+  writes — including when the `elastic` block is the check's only assertion, so
+  you don't need an unrelated trigger just to get the retry window.
+
+For an **asynchronous pipeline** (the app/Flink writes to ES out-of-band), gate
+on the downstream signal first: `kafka.expect_message` on the output topic (with
+`timeout_ms`), then the `elastic` assertion. See the Flink gotchas in
+[configuration.md](configuration.md#flink-gotchas-learned-the-hard-way).
 
 The Elasticsearch container runs single-node with security disabled (plain HTTP),
 which works for both ES 7 and 8. Declare it as `elastic:8.13.4` /

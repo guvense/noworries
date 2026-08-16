@@ -208,6 +208,11 @@ pub struct FlinkSpec {
     /// RUNNING (default 120).
     #[serde(default, rename = "submit_timeout")]
     pub submit_timeout: Option<u64>,
+    /// Kafka topics to pre-create before the jobs start. noworries also
+    /// auto-collects topics referenced in checks' `kafka.produce` /
+    /// `kafka.expect_message`, so this is only for topics no check names.
+    #[serde(default)]
+    pub topics: Vec<String>,
     /// Jobs to build + submit, in order.
     pub jobs: Vec<FlinkJob>,
 }

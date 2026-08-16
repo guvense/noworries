@@ -158,6 +158,7 @@ checks:
 | `taskmanagers`  | `1`          | Number of TaskManager replicas. |
 | `slots`         | `2`          | Task slots per TaskManager (caps job parallelism). |
 | `submit_timeout`| `120`        | Seconds to wait for the REST API and for each job to reach `RUNNING`. |
+| `topics`        | `[]`         | Extra Kafka topics to pre-create before jobs start. Topics named by a check's `kafka.produce` / `kafka.expect_message` are added automatically; use this only for a source/sink topic no check references. |
 | `jobs`          | —            | Non-empty, ordered list of jobs to build + submit. |
 
 Each job: `jar` (required, relative to the project dir), optional `build` (shell
@@ -179,6 +180,37 @@ ports the host-side app model uses:
 Configure your job to read those hostnames (either hard-coded, or from the
 injected `NOWORRIES_*` env vars). First run is slow — the `flink` image (~600MB)
 plus your services pull; use `--timeout 600`.
+
+### Flink gotchas (learned the hard way)
+
+- **Java version.** The default `flink:1.19` bundles **Java 11**. A job compiled
+  for **Java 17** fails to load — set `image: flink:1.19-java17` (or a matching
+  tag) explicitly.
+- **Kafka source topics must exist first.** Flink's `KafkaSource` uses
+  `AdminClient.describeTopics`, which does **not** trigger broker auto-create
+  (even with `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true`) — the job would hard-fail on
+  a missing source topic. **noworries handles this for you:** before submitting
+  the jobs it pre-creates every topic referenced by a check's `kafka.produce` /
+  `kafka.expect_message`, plus any you list in `flink.topics`. So you no longer
+  need an `ensureTopics()` step in the job — just make sure the source topic is
+  named by a check or in `flink.topics`. (One partition / one replica; declare
+  the topic in `flink.topics` only if no check names it.)
+- **`flink-connector-elasticsearch7` ≠ ES 8.** The ES 7 connector can't parse an
+  ES 8 bulk response (`IOException: Unable to parse response body`). If you use
+  that connector, pin the service to ES 7 — `services: [elasticsearch:7.17.22]`
+  — instead of the default ES 8.x.
+- **Elasticsearch refresh policy.** The connector exposes no bulk-level refresh
+  policy, and an **item-level** `setRefreshPolicy(...)` is rejected
+  (`RefreshPolicy is not supported on an item request`). Control visibility via
+  the index template instead: `settings: { refresh_interval: "100ms" }` in your
+  `elastic.template`. (noworries also issues a `_refresh` before each search
+  assertion, so `expect_hits` no longer races the default 1s interval.)
+- **Observe async pipelines in stages.** A Flink pipeline is asynchronous:
+  gate on the *downstream* signal before asserting the sink. Put
+  `kafka.expect_message` on the output topic (with `timeout_ms`) **first**, then
+  the `elastic`/`db` assertion. noworries retries the observers within the
+  check's budget, but the explicit downstream wait fails fast with a clear
+  message when the job never produced.
 
 ## `setup` (optional)
 

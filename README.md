@@ -23,6 +23,8 @@ Runs natively on **macOS, Linux, and Windows**.
 
 <img src="docs/demo.svg" alt="A noworries run: real Postgres, Redis and Kafka spun up, the app started, checks run — result READY" width="740">
 
+**→ [Supported frameworks, services & checks](docs/supported.md)**
+
 </div>
 
 ---
@@ -38,6 +40,32 @@ out later, by hand, or in production.
 `noworries` closes that gap. It turns "looks right" into a concrete
 **READY / NOT READY** you (and the AI) can act on — with the *actual* services
 running, not mocks-of-everything.
+
+## With an AI — or by hand
+
+noworries is built for the **agent loop**, and that's where it earns its keep.
+In Claude Code, `/noworries` looks at what the AI just changed, **writes the
+`noworries.yml` for it**, runs it, reads the structured `results.json`
+(expected-vs-actual per assertion), and **fixes its own code until the run is
+READY** — no human in the loop. The spec stays in step with the code because the
+same agent that edits the code updates the checks.
+
+You don't need an AI to use it, though — the binary is standalone (there are
+**zero AI or network calls when it runs**):
+
+- **By hand.** Write `noworries.yml` yourself. It's a small declarative file
+  (services + checks), *not* test code — see [`noworries.yml` at a
+  glance](#noworriesyml-at-a-glance). Run `noworries`, read **READY / NOT
+  READY**, commit the file, run it in CI. Everything behaves identically; the
+  only difference is that *you* author and maintain the YAML.
+- **With an AI.** The agent writes that YAML for you, keeps it in sync as the
+  code evolves, and closes the fix-and-rerun loop on its own.
+
+Same engine either way. The AI isn't a runtime dependency — it's the thing that
+removes the last piece of manual work (writing and updating the spec). Run it
+solo and you get a real integration harness; run it under an agent and you get a
+hands-off "did my change actually work?" gate. **That autonomous loop is where
+the real value is.**
 
 ## "Why not just have the AI write Testcontainers tests?"
 
@@ -285,6 +313,7 @@ See **[docs/architecture.md](docs/architecture.md)**.
 
 ## Documentation
 
+- **[Supported frameworks, services & checks](docs/supported.md)** — the full compatibility list at a glance.
 - **[Getting started](docs/getting-started.md)** — install, first run, the loop.
 - **[Configuration](docs/configuration.md)** — the full `noworries.yml` schema.
 - **[Checks](docs/checks.md)** — every assertion type with examples.

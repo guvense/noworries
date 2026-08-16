@@ -1359,6 +1359,25 @@ fn exec_elastic_op(base: &str, index: &str, op: &crate::spec::ElasticOp) -> Asse
 fn verify_elastic(base: &str, e: &crate::spec::ElasticAssertion) -> Vec<AssertionResult> {
     let mut out = Vec::new();
 
+    // A declared index template is itself an assertion: confirm noworries
+    // installed it (applied pre-app in `apply_elastic_templates`). This also
+    // lets a template-only check pass instead of failing as "no assertions".
+    if let Some(tpl) = &e.template {
+        let path = if tpl.legacy {
+            format!("/_template/{}", tpl.name)
+        } else {
+            format!("/_index_template/{}", tpl.name)
+        };
+        out.push(match es_request(base, "GET", &path, None) {
+            Ok((200, _)) => es_ok(format!("index template \"{}\" installed", tpl.name)),
+            Ok((s, _)) => fail_elastic(format!(
+                "index template \"{}\" not found (HTTP {s}) — did it fail to apply?",
+                tpl.name
+            )),
+            Err(err) => fail_elastic(format!("template \"{}\" check failed: {err}", tpl.name)),
+        });
+    }
+
     if let Some(id) = &e.doc_id {
         match es_request(base, "GET", &format!("/{}/_doc/{}", e.index, id), None) {
             Ok((status, body)) => {
@@ -1399,6 +1418,12 @@ fn verify_elastic(base: &str, e: &crate::spec::ElasticAssertion) -> Vec<Assertio
     }
 
     if let Some(q) = &e.query {
+        // Make recent external writes visible: a downstream sink (e.g. a Flink
+        // job) writes through its own client, so noworries can't tag those with
+        // `?refresh=true`, and the default 1s refresh interval would hide them
+        // from search. A best-effort refresh removes that race. (noworries' own
+        // operations already refresh; this covers writes it didn't make.)
+        let _ = es_request(base, "POST", &format!("/{}/_refresh", e.index), None);
         let body = serde_json::json!({ "query": yaml_to_json(q) });
         match es_request(base, "POST", &format!("/{}/_search", e.index), Some(&body)) {
             Ok((_status, resp)) => {
@@ -1443,9 +1468,10 @@ fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mu
     }
 
     // Verification (of the operations' effect and/or the app's writes), retried
-    // for eventual consistency.
-    let has_verification =
-        e.doc_id.is_some() || e.query.is_some();
+    // for eventual consistency. A declared `template` counts as verifiable on
+    // its own (assert it installed), so a template-only check doesn't fail as
+    // "no assertions".
+    let has_verification = e.doc_id.is_some() || e.query.is_some() || e.template.is_some();
     if !has_verification {
         return;
     }
@@ -1836,7 +1862,11 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
                 // stats, which refresh on a delay after a publish.
                 || check.clickhouse.is_some()
                 || check.rabbitmq.is_some()
-                || check.cassandra.is_some();
+                || check.cassandra.is_some()
+                // Elasticsearch/OpenSearch search + get: a downstream sink (e.g. a
+                // Flink job) writes asynchronously and the index refreshes on a
+                // delay, so search-based assertions need the retry window too.
+                || check.elastic.is_some();
             let retry_budget = observe_retry_budget(check, async_effect);
             run_db(check, ctx, retry_budget, &mut assertions);
             run_mysql_verify(check, ctx, retry_budget, &mut assertions);

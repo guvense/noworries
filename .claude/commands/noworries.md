@@ -6,9 +6,12 @@ allowed-tools: Bash(noworries:*), Bash(cargo:*), Bash(git:*), Bash(docker:*), Re
 
 # /noworries
 
-> **Requires `noworries` >= 0.4.0** (`noworries --version`). Older builds lack
-> the extensible check types (graphql/metrics/snapshot/schema/sse/websocket/grpc/
-> traces), `externals`/`mock`, `setup` hooks, and interpolated `app.env`.
+> **Requires `noworries` >= 0.6.0** (`noworries --version`). 0.6 adds the
+> `dotnet`/`rails`/`laravel`/`django` framework adapters and the `mariadb`
+> service. Needs `noworries spec`/`validate`, `spec --format json`, mock
+> `body_contains`/`delay_ms`, and `external_calls.timeout_ms`. Older builds also
+> lack the extensible check types
+> (graphql/metrics/snapshot/schema/sse/websocket/grpc/traces) and `externals`/`mock`.
 
 After code has been written, verify it actually works: stand up its
 infrastructure in ephemeral Docker containers, start the app against them, run
@@ -33,13 +36,18 @@ The reference below covers the common fields. For anything whose **exact YAML
 shape isn't shown here**:
 
 - `noworries spec` (alias `noworries schema`) prints the **full field reference
-  bundled with the installed binary** — use it as the source of truth for this
-  version.
+  bundled with the installed binary**. `noworries spec --format json` prints a
+  **JSON Schema** generated from the actual types — query it programmatically
+  (`.definitions.MockStub.properties`) or point a YAML editor at it for completion.
 - `noworries validate` (or `noworries --file <f> validate`) parses the spec
   **without starting containers** and prints a precise error, e.g.
   `checks[0].request: unknown field "verb", expected one of "method", "path",
   "headers", "body" at line 7 column 9`. Write a minimal block, validate, read the
   error, fix — iterate fast.
+
+> **`noworries spec` is authoritative.** When its output (or `--format json`)
+> differs from the reference below, **trust `noworries spec`** — it matches the
+> installed binary's actual accepted schema; this doc may lag the binary.
 
 > **If a field's shape is still unclear, do NOT infer it from a local source
 > checkout.** Either ask the user, or make a minimal probe and read the
@@ -66,7 +74,7 @@ shape isn't shown here**:
 
 ## Supported services
 
-`postgres` · `mysql` · `mongodb` (`mongo`) · `redis` · `kafka` ·
+`postgres` · `mysql` · `mariadb` · `mongodb` (`mongo`) · `redis` · `kafka` ·
 `elastic` (`elasticsearch`). Declare as `kind` or `kind:tag`:
 
 ```yaml
@@ -74,15 +82,20 @@ services: [ postgres:16-alpine, mysql, mongodb, redis, kafka, elastic ]
 ```
 
 Container credentials are `noworries`/`noworries`/`noworries` where applicable
-(postgres, mysql). Mongo/redis/kafka/elastic run without auth.
+(postgres, mysql/mariadb). Mongo/redis/kafka/elastic run without auth. `mariadb`
+is wire-compatible with MySQL, so it reuses the MySQL provider and `db`/`mysql`
+checks — only the pulled image differs (`mariadb:11` by default).
 
 ## Frameworks
 
 Auto-detected from the project root (override with `app.framework`): **Spring
-Boot** (`pom.xml`/`gradle`/`mvnw`), **Go** (`go.mod`), **FastAPI** (`main.py`/
-`app.py` or a fastapi/uvicorn manifest), **Node.js** (`package.json`). Detection
-priority is Spring → Go → FastAPI → Node, so a JVM app that also ships a
-`package.json` still detects as Spring. Spring probes `/actuator/health`; the
+Boot** (`pom.xml`/`gradle`/`mvnw`), **ASP.NET Core** (`*.csproj`/`*.sln`), **Go**
+(`go.mod`), **Rails** (`bin/rails`/`config/application.rb`), **Laravel**
+(`artisan`), **Django** (`manage.py`), **FastAPI** (`main.py`/`app.py` or a
+fastapi/uvicorn manifest), **Node.js** (`package.json`). Detection priority is
+Spring → .NET → Go → Rails → Laravel → Django → FastAPI → Node, so a JVM app that
+also ships a `package.json` still detects as Spring, and a Django project with a
+stray `main.py` still detects as Django. Spring probes `/actuator/health`; the
 others wait for the TCP port (`health: none`) unless you set `app.health`.
 
 > **Detection is from the project root only** (the `--dir`, default cwd). In a
@@ -107,8 +120,8 @@ usually **don't need to touch config files**.
 | kafka     | `SPRING_KAFKA_BOOTSTRAP_SERVERS` |
 | elastic   | `SPRING_ELASTICSEARCH_URIS` |
 
-**Go / FastAPI / Node.js** (conventional connection strings — read whichever your
-client expects):
+**Go / FastAPI / Node.js / Django / Rails / .NET** (conventional connection
+strings — read whichever your client expects):
 
 | Service   | Variables |
 | --------- | --------- |
@@ -119,12 +132,16 @@ client expects):
 | kafka     | `KAFKA_BROKERS`, `KAFKA_BOOTSTRAP_SERVERS` |
 | elastic   | `ELASTICSEARCH_URL`, `ELASTIC_URL` |
 
+**Laravel** gets the conventional vars above **plus** its native discrete keys:
+`DB_CONNECTION` (`pgsql`/`mysql`), `DB_HOST`/`DB_PORT`/`DB_DATABASE`/
+`DB_USERNAME`/`DB_PASSWORD`, and `REDIS_HOST`/`REDIS_PORT`.
+
 **All frameworks:**
 
 | Service   | Variables |
 | --------- | --------- |
 | (all)     | `NOWORRIES_<SERVICE>_HOST`, `NOWORRIES_<SERVICE>_PORT` (framework-agnostic) |
-| (app)     | port env: `SERVER_PORT` (Spring) / `PORT` (Go/FastAPI/Node), or `app.port_env` |
+| (app)     | port env: `SERVER_PORT` (Spring) / `ASPNETCORE_HTTP_PORTS` (.NET) / `PORT` (the rest), or `app.port_env` |
 
 If both postgres and mysql are declared, `DATABASE_URL` is the last one wired —
 use the per-part vars (`PGHOST` vs `MYSQL_HOST`) to disambiguate.
@@ -161,6 +178,26 @@ reaches services by compose name + container port, NOT the host ports: `kafka:90
 `postgres:5432`, `elastic:9200`, `redis:6379`, `mysql:3306`, `mongodb:27017`.
 These are also injected as `NOWORRIES_<SERVICE>_HOST`/`_PORT`. Configure the job
 to use those. First run pulls the ~600MB Flink image — use `--timeout 600`.
+
+**Flink gotchas — check these before blaming the spec:**
+
+- **Java 17 job?** The default `flink:1.19` is **Java 11**; set
+  `image: flink:1.19-java17` or the job won't load.
+- **Kafka source topic must pre-exist** (`KafkaSource` uses
+  `AdminClient.describeTopics`, which does *not* auto-create). noworries now
+  pre-creates every topic a check's `kafka.produce`/`kafka.expect_message` names,
+  plus any in `flink.topics`, before the jobs start — so no `ensureTopics()` in
+  the job. Just ensure the source topic is named by a check or listed in
+  `flink.topics: [my-source]`.
+- **ES 7 connector + default ES 8 = incompatible.** `flink-connector-elasticsearch7`
+  can't parse ES 8 bulk responses (`Unable to parse response body`); pin
+  `services: [elasticsearch:7.17.22]` when using that connector.
+- **ES refresh:** the connector rejects item-level `setRefreshPolicy`; set
+  `refresh_interval: "100ms"` in the `elastic.template` settings. (noworries also
+  `_refresh`es before each search assertion.)
+- **Observe async in stages:** `kafka.expect_message` on the downstream topic
+  (with `timeout_ms`) **before** the `elastic`/`db` assert — fails fast and clear
+  when the job never emitted.
 
 ## External / upstream services (app calls out to something noworries can't run)
 
@@ -223,14 +260,20 @@ externals:
       stubs:                            # ARRAY; matched top-to-bottom, FIRST match wins
         - when: { method: GET, path: /charge/1 }         # `path` is an EXACT match; query string ignored
           respond: { status: 200, body: { id: "1", status: "PAID" }, headers: { X-Trace: "t" } }
+        - when: { path: /charge, body_contains: { amount: 200 } }   # match by request BODY too
+          respond: { status: 402, body: { error: "too big" } }      # same path, different response per payload
+        - when: { path: /slow }
+          respond: { status: 200, delay_ms: 3000 }   # artificial latency → test client timeout/circuit-breaker
         - when: { path: /webhook }      # `method` OMITTED → matches ANY method
           respond: { status: 202 }      # body/headers optional; default status 200
       # A request matching NO stub is still RECORDED and answered `200` with an empty body.
 ```
 
-`mock.stubs[]` — each: `when { method? , path }` and `respond { status?=200, body?, headers? }`.
-`body` is JSON (a plain string is sent as-is). `path` matches exactly (no prefix/regex);
-the query string is ignored. Omitting `when.method` matches any method.
+`mock.stubs[]` — each: `when { method?, path, body_contains? }` and
+`respond { status?=200, body?, headers?, delay_ms? }`. `path` matches exactly (no
+prefix/regex; query ignored); `when.method` omitted = any; `when.body_contains` is
+a deep-subset match on the request JSON body (put specific body stubs before a
+catch-all). `respond.delay_ms` adds latency before replying. `body` is JSON.
 
 Then assert the app actually called the mock:
 
@@ -245,11 +288,12 @@ checks:
         path: /charge                   # EXACT path match (query string ignored)
         body_contains: { amount: 100 }  # deep-SUBSET match on the recorded JSON body
         times: 1                        # exact count; OMIT for "at least one"
+        timeout_ms: 8000                # OPTIONAL wait for an async call (default ~6s window)
 ```
 
-`external_calls` is retry-aware (for calls the app makes asynchronously). Matching:
-`path` exact, `method` optional (any if omitted), `body_contains` deep-subset,
-`times` exact-count or (omitted) at-least-one.
+`external_calls` is retry-aware. Matching: `path` exact, `method` optional (any if
+omitted), `body_contains` deep-subset, `times` exact-count or (omitted)
+at-least-one, `timeout_ms` = how long to wait for an asynchronous call.
 
 ## Edge-case scenarios (don't just test the happy path)
 
@@ -388,6 +432,41 @@ Beyond checks: top-level **`setup`** = shell commands (migrations/fixtures, e.g.
 starts. **`externals[].mock`** stands up an in-process fake (stubs + records
 calls) so you can assert outbound behaviour with `external_calls` instead of
 hitting a real sandbox. Reports: `--junit <path>` / `--html <path>` for CI.
+
+### Newer check types — examples
+
+(Run `noworries spec` for the authoritative shapes; these show the common cases.)
+
+```yaml
+checks:
+  # graphql — POST a query/mutation, assert on data (path default /graphql)
+  - name: "order query"
+    graphql: { path: /graphql, query: "query { order(id:1){status} }", expect_data: { order: { status: "PENDING" } } }
+
+  # metrics — scrape Prometheus, match a series by labels, compare its value
+  - name: "request counted"
+    request: { method: POST, path: /orders, body: { sku: "A" } }
+    expect:  { status: 201 }
+    metrics: { path: /actuator/prometheus, metric: http_server_requests_seconds_count, labels: { status: "201" }, expect: ">= 1" }
+
+  # sse — read an event stream until a matching event
+  - name: "OrderCreated streamed"
+    sse: { path: /events, contains: { type: "OrderCreated" }, timeout_ms: 5000 }
+
+  # websocket — connect, optionally send, await a matching message (ws:// or relative path)
+  - name: "subscription pushes update"
+    websocket: { url: "ws://127.0.0.1:${SERVER_PORT}/ws", send: { subscribe: "orders" }, expect_message: { type: "OrderCreated" }, timeout_ms: 5000 }
+
+  # grpc — via grpcurl on PATH (reflection or protos:[]/import_paths:[])
+  - name: "GetOrder returns the order"
+    grpc: { target: "127.0.0.1:${NOWORRIES_GRPC_PORT}", method: "orders.OrderService/GetOrder", data: { id: "ABC" }, expect_contains: { status: "PENDING" } }
+
+  # traces — app exports to Jaeger/Tempo; query its HTTP API for matching spans
+  - name: "request produced a trace"
+    request: { method: POST, path: /orders, body: { sku: "A" } }
+    expect:  { status: 201 }
+    traces: { query_url: "http://127.0.0.1:16686/api/traces", service: "orders-service", operation: "POST /orders", tags: { "http.status_code": "201" }, min_count: 1 }
+```
 
 ## Important behaviours
 

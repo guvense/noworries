@@ -16,7 +16,7 @@
 //! The cluster is destroyed by the run's `docker compose down -v` teardown, so
 //! jobs need no explicit cancellation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 
-use crate::spec::{FlinkJob, FlinkSpec, ServiceKind};
+use crate::spec::{CheckSpec, FlinkJob, FlinkSpec, ServiceKind};
 
 /// JobManager REST / web-UI container port.
 pub const REST_PORT: u16 = 8081;
@@ -62,6 +62,61 @@ pub fn in_network_coords(kind: ServiceKind) -> (&'static str, u16) {
         ServiceKind::Clickhouse => ("clickhouse", 8123),
         ServiceKind::Cassandra => ("cassandra", 9042),
     }
+}
+
+/// Topic names the pipeline likely sources/sinks: those referenced in checks'
+/// `kafka.produce` / `kafka.expect_message`, plus any listed in `flink.topics`.
+/// Deduplicated and sorted for stable output.
+pub fn referenced_topics(fs: &FlinkSpec, checks: &[CheckSpec]) -> Vec<String> {
+    let mut set: BTreeSet<String> = fs.topics.iter().cloned().collect();
+    for c in checks {
+        if let Some(k) = &c.kafka {
+            if let Some(p) = &k.produce {
+                set.insert(p.topic.clone());
+            }
+            if let Some(e) = &k.expect_message {
+                set.insert(e.topic.clone());
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// Pre-create Kafka topics (idempotently) before a job's `KafkaSource` starts.
+///
+/// Flink's `KafkaSource` resolves partitions via `AdminClient.describeTopics`,
+/// which does **not** trigger broker auto-create (even with
+/// `KAFKA_AUTO_CREATE_TOPICS_ENABLE=true`), so a missing source topic hard-fails
+/// the job before it can run. We create them with the image's `kafka-topics.sh`;
+/// one partition / one replica is enough for the single-broker harness. Returns
+/// the topics successfully ensured (best-effort: a failure is left for the job
+/// to surface with its own clearer error).
+pub fn ensure_kafka_topics(compose_file: &str, project: &str, topics: &[String]) -> Vec<String> {
+    let mut ensured = Vec::new();
+    for t in topics {
+        let out = crate::lifecycle::compose_exec(
+            compose_file,
+            project,
+            "kafka",
+            &[
+                "/opt/kafka/bin/kafka-topics.sh",
+                "--create",
+                "--if-not-exists",
+                "--topic",
+                t,
+                "--bootstrap-server",
+                "localhost:9092",
+                "--partitions",
+                "1",
+                "--replication-factor",
+                "1",
+            ],
+        );
+        if out.code == 0 {
+            ensured.push(t.clone());
+        }
+    }
+    ensured
 }
 
 #[derive(Serialize)]
@@ -365,8 +420,33 @@ mod tests {
             taskmanagers: None,
             slots: None,
             submit_timeout: None,
+            topics: vec![],
             jobs,
         }
+    }
+
+    #[test]
+    fn referenced_topics_dedupes_explicit_and_check_topics() {
+        use crate::spec::NoworriesSpec;
+        let yaml = r#"
+version: 1
+services: [kafka, postgres]
+flink:
+  topics: [manual-topic]
+  jobs:
+    - jar: target/p.jar
+checks:
+  - name: "produce and expect"
+    kafka: { produce: { topic: "events-in", message: { id: "E1" } } }
+  - name: "downstream"
+    kafka: { expect_message: { topic: "events-out", contains: { id: "E1" } } }
+  - name: "dup source"
+    kafka: { produce: { topic: "events-in", message: { id: "E2" } } }
+"#;
+        let s = NoworriesSpec::parse(yaml).unwrap();
+        let topics = referenced_topics(s.flink.as_ref().unwrap(), &s.checks);
+        // sorted + deduped: events-in once, events-out, manual-topic.
+        assert_eq!(topics, vec!["events-in", "events-out", "manual-topic"]);
     }
 
     fn job(jar: &str) -> FlinkJob {
