@@ -38,6 +38,7 @@ checks:
         kind: ServiceKind::Mongodb,
         host_port: port,
         container_port: 27017,
+        aux_ports: Default::default(),
     }];
     let ctx = RunnerContext::new(0, endpoints);
 

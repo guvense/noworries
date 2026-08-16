@@ -43,14 +43,17 @@ jobs:
       - name: Start real infrastructure
         run: docker compose -f ci/docker-compose.yml up -d --wait
 
-      - name: Integration tests (real Kafka / Elasticsearch / MySQL / MongoDB / Postgres)
+      - name: Integration tests (real Kafka / Elasticsearch / MySQL / MongoDB / Postgres / ClickHouse / RabbitMQ)
         env:
           NOWORRIES_IT_KAFKA_PORT: "9092"
           NOWORRIES_IT_ES_PORT: "9200"
           NOWORRIES_IT_MYSQL_PORT: "3306"
           NOWORRIES_IT_MONGO_PORT: "27017"
           NOWORRIES_IT_PG_PORT: "5432"
-        run: cargo test --test kafka_it --test elastic_it --test mysql_it --test mongo_it --test scenario_it --test schema_it -- --nocapture
+          NOWORRIES_IT_CLICKHOUSE_PORT: "8123"
+          NOWORRIES_IT_RABBITMQ_PORT: "5672"
+          NOWORRIES_IT_RABBITMQ_MGMT_PORT: "15672"
+        run: cargo test --test kafka_it --test elastic_it --test mysql_it --test mongo_it --test scenario_it --test schema_it --test clickhouse_it --test rabbitmq_it -- --nocapture
 
       # Copy the Flink image's built-in streaming example so the flink_it test can
       # submit a real job (upload -> run -> poll RUNNING) without building one.
@@ -70,6 +73,45 @@ jobs:
       - name: Tear down infrastructure
         if: always()
         run: docker compose -f ci/docker-compose.yml down -v
+
+  # Heavy datastores (SQL Server + Cassandra) in a SEPARATE job so their slow
+  # boot doesn't gate the main integration job. Both checks query the datastore
+  # with the client baked into the image via `docker compose exec`, so the tests
+  # get the compose project/file to exec into.
+  integration-heavy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build integration test binaries
+        run: cargo build --tests
+
+      - name: Start heavy infrastructure (SQL Server + Cassandra)
+        run: docker compose -f ci/docker-compose.heavy.yml up -d --wait
+
+      - name: Integration tests (real SQL Server / Cassandra)
+        env:
+          NOWORRIES_IT_MSSQL_PORT: "1433"
+          NOWORRIES_IT_CASSANDRA_PORT: "9042"
+          NOWORRIES_IT_COMPOSE_FILE: "ci/docker-compose.heavy.yml"
+          NOWORRIES_IT_COMPOSE_PROJECT: "noworries-ci-heavy"
+        run: cargo test --test mssql_it --test cassandra_it -- --nocapture
+
+      - name: Tear down heavy infrastructure
+        if: always()
+        run: docker compose -f ci/docker-compose.heavy.yml down -v
 
   # Native-Windows compile gate. The Unix/Windows process handling is cfg-split
   # (src/app.rs::kill_tree, shell_command), and only a real Windows build proves

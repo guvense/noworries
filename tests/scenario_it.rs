@@ -43,6 +43,7 @@ checks:
         kind: ServiceKind::Kafka,
         host_port: port,
         container_port: 9092,
+        aux_ports: Default::default(),
     }];
     let ctx = RunnerContext::new(0, endpoints);
 

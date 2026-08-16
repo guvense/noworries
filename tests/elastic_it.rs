@@ -49,6 +49,7 @@ checks:
         kind: ServiceKind::Elastic,
         host_port: port,
         container_port: 9200,
+        aux_ports: Default::default(),
     }];
 
     // Templates are applied before the app starts in a real run.

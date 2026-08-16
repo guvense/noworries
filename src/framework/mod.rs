@@ -9,18 +9,29 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::lifecycle::ServiceEndpoint;
+use crate::services::clickhouse::{CLICKHOUSE_DB, CLICKHOUSE_PASSWORD, CLICKHOUSE_USER};
+use crate::services::mssql::MSSQL_SA_PASSWORD;
 use crate::services::mysql::{MYSQL_DB, MYSQL_PASSWORD, MYSQL_USER};
+use crate::services::rabbitmq::{RABBITMQ_PASSWORD, RABBITMQ_USER};
 use crate::services::{PG_DB, PG_PASSWORD, PG_USER};
 use crate::spec::ServiceKind;
 
+pub mod django;
+pub mod dotnet;
 pub mod go;
+pub mod laravel;
 pub mod node;
 pub mod python;
+pub mod rails;
 pub mod spring_boot;
 
+pub use django::Django;
+pub use dotnet::DotNet;
 pub use go::Go;
+pub use laravel::Laravel;
 pub use node::NodeJs;
 pub use python::FastApi;
+pub use rails::Rails;
 pub use spring_boot::SpringBoot;
 
 /// The interface every framework implements.
@@ -51,7 +62,11 @@ pub trait Framework {
 pub fn registry() -> Vec<Box<dyn Framework>> {
     vec![
         Box::new(SpringBoot),
+        Box::new(DotNet),
         Box::new(Go),
+        Box::new(Rails),
+        Box::new(Laravel),
+        Box::new(Django),
         Box::new(FastApi),
         Box::new(NodeJs),
     ]
@@ -133,6 +148,52 @@ pub fn conventional_env(endpoints: &[ServiceEndpoint]) -> BTreeMap<String, Strin
                 m.insert("ELASTICSEARCH_URL".to_string(), url.clone());
                 m.insert("ELASTIC_URL".to_string(), url);
             }
+            ServiceKind::Cockroach => {
+                // Postgres-wire, but auth is `root` with no password against
+                // `defaultdb` in single-node insecure mode.
+                m.insert(
+                    "DATABASE_URL".to_string(),
+                    format!("postgres://root@{host}:{p}/defaultdb?sslmode=disable"),
+                );
+                m.insert("PGHOST".to_string(), host.to_string());
+                m.insert("PGPORT".to_string(), p.to_string());
+                m.insert("PGUSER".to_string(), "root".to_string());
+                m.insert("PGDATABASE".to_string(), "defaultdb".to_string());
+            }
+            ServiceKind::Opensearch => {
+                let url = format!("http://{host}:{p}");
+                m.insert("OPENSEARCH_URL".to_string(), url.clone());
+                // OpenSearch clients often reuse the Elasticsearch env var.
+                m.insert("ELASTICSEARCH_URL".to_string(), url);
+            }
+            ServiceKind::Mssql => {
+                m.insert(
+                    "DATABASE_URL".to_string(),
+                    format!("sqlserver://sa:{MSSQL_SA_PASSWORD}@{host}:{p}"),
+                );
+                m.insert("MSSQL_HOST".to_string(), host.to_string());
+                m.insert("MSSQL_PORT".to_string(), p.to_string());
+                m.insert("MSSQL_USER".to_string(), "sa".to_string());
+                m.insert("MSSQL_SA_PASSWORD".to_string(), MSSQL_SA_PASSWORD.to_string());
+            }
+            ServiceKind::Rabbitmq => {
+                let url = format!("amqp://{RABBITMQ_USER}:{RABBITMQ_PASSWORD}@{host}:{p}");
+                m.insert("RABBITMQ_URL".to_string(), url.clone());
+                m.insert("AMQP_URL".to_string(), url);
+            }
+            ServiceKind::Clickhouse => {
+                m.insert("CLICKHOUSE_URL".to_string(), format!("http://{host}:{p}"));
+                m.insert("CLICKHOUSE_HOST".to_string(), host.to_string());
+                m.insert("CLICKHOUSE_PORT".to_string(), p.to_string());
+                m.insert("CLICKHOUSE_USER".to_string(), CLICKHOUSE_USER.to_string());
+                m.insert("CLICKHOUSE_PASSWORD".to_string(), CLICKHOUSE_PASSWORD.to_string());
+                m.insert("CLICKHOUSE_DATABASE".to_string(), CLICKHOUSE_DB.to_string());
+            }
+            ServiceKind::Cassandra => {
+                m.insert("CASSANDRA_CONTACT_POINTS".to_string(), host.to_string());
+                m.insert("CASSANDRA_HOST".to_string(), host.to_string());
+                m.insert("CASSANDRA_PORT".to_string(), p.to_string());
+            }
         }
     }
     m
@@ -199,6 +260,42 @@ mod tests {
     }
 
     #[test]
+    fn detects_django() {
+        assert_eq!(detected_name(&["manage.py"]).as_deref(), Some("django"));
+    }
+
+    #[test]
+    fn detects_dotnet() {
+        assert_eq!(detected_name(&["Api.csproj"]).as_deref(), Some("dotnet"));
+        assert_eq!(detected_name(&["Solution.sln"]).as_deref(), Some("dotnet"));
+        assert_eq!(detected_name(&["App.fsproj"]).as_deref(), Some("dotnet"));
+    }
+
+    #[test]
+    fn detects_laravel() {
+        assert_eq!(detected_name(&["artisan"]).as_deref(), Some("laravel"));
+    }
+
+    #[test]
+    fn detects_rails() {
+        // bin/rails is nested, so build the marker by hand.
+        let s = Scratch::with(&[]);
+        std::fs::create_dir_all(s.dir.join("bin")).unwrap();
+        std::fs::write(s.dir.join("bin").join("rails"), b"#!/usr/bin/env ruby").unwrap();
+        assert_eq!(detect(&s.dir, None).map(|f| f.name().to_string()).as_deref(), Some("rails"));
+    }
+
+    #[test]
+    fn django_wins_over_fastapi_when_both_markers_present() {
+        // A Django project that also happens to ship a main.py must resolve to
+        // django (manage.py checked first via registry ordering).
+        assert_eq!(
+            detected_name(&["manage.py", "main.py"]).as_deref(),
+            Some("django")
+        );
+    }
+
+    #[test]
     fn spring_wins_over_node_when_both_present() {
         // A Spring project shipping a package.json (e.g. a JS frontend) must
         // still resolve to spring-boot thanks to registry ordering.
@@ -226,12 +323,48 @@ mod tests {
             Box::new(NodeJs) as Box<dyn Framework>,
             Box::new(FastApi),
             Box::new(Go),
+            Box::new(Django),
+            Box::new(Rails),
+            Box::new(Laravel),
         ] {
             assert_eq!(f.default_health_path(), "none");
             assert_eq!(f.default_port_env(), "PORT");
         }
         assert_eq!(SpringBoot.default_port_env(), "SERVER_PORT");
         assert_eq!(SpringBoot.default_health_path(), "/actuator/health");
+        // .NET binds via Kestrel's own env var, not PORT.
+        assert_eq!(DotNet.default_port_env(), "ASPNETCORE_HTTP_PORTS");
+        assert_eq!(DotNet.default_health_path(), "none");
+    }
+
+    #[test]
+    fn laravel_env_wiring_covers_all_service_kinds_and_emits_db_vars() {
+        let eps: Vec<ServiceEndpoint> = [
+            ServiceKind::Postgres,
+            ServiceKind::Mysql,
+            ServiceKind::Mongodb,
+            ServiceKind::Redis,
+            ServiceKind::Kafka,
+            ServiceKind::Elastic,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| ServiceEndpoint {
+            service: kind.as_str().to_string(),
+            kind,
+            host_port: 20000 + i as u16,
+            container_port: 5432,
+            aux_ports: BTreeMap::new(),
+        })
+        .collect();
+
+        let env = Laravel.env_wiring(&eps);
+        // Postgres is index 0, but Mysql (index 1) overwrites DB_CONNECTION last.
+        assert_eq!(env.get("DB_CONNECTION").map(|s| s.as_str()), Some("mysql"));
+        assert_eq!(env.get("DB_PORT").map(|s| s.as_str()), Some("20001"));
+        assert_eq!(env.get("REDIS_PORT").map(|s| s.as_str()), Some("20003"));
+        // Base conventional vars still present for kinds Laravel doesn't map.
+        assert_eq!(env.get("KAFKA_BROKERS").map(|s| s.as_str()), Some("127.0.0.1:20004"));
     }
 
     #[test]
@@ -251,6 +384,7 @@ mod tests {
             kind,
             host_port: 10000 + i as u16,
             container_port: 5432,
+            aux_ports: BTreeMap::new(),
         })
         .collect();
 

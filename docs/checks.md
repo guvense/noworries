@@ -12,7 +12,7 @@ Assertions run in this order so that actions happen before observations:
 6. Kafka `expect_message`
 7. `external_calls` — assert the app called a mocked external (retry-aware)
 8. `logs` — assert the app log contains / omits patterns (retry-aware)
-9. Protocol & observability types — `graphql`, `metrics`, `snapshot`, `schema`, `sse`, `websocket`, `grpc`, `traces` (see below)
+9. Protocol, datastore & observability types — `graphql`, `metrics`, `snapshot`, `schema`, `clickhouse`, `rabbitmq`, `cassandra`, `sse`, `websocket`, `grpc`, `traces` (see below)
 
 ## HTTP
 
@@ -307,6 +307,84 @@ the check.
 (The container uses `user/password/db = noworries`. Declare it as `mysql` /
 `mysql:8.0` → `mysql:8.4` by default.)
 
+## ClickHouse
+
+Run a `SELECT` over ClickHouse's HTTP interface (port 8123) and check the
+result. Uses the built-in HTTP client — no native driver — so it works out of
+the box once you declare a `clickhouse` service.
+
+```yaml
+- name: "event is recorded in the analytics store"
+  request: { method: POST, path: /events, body: { user_id: 42, kind: click } }
+  expect:  { status: 202 }
+  clickhouse:
+    query: "SELECT count() FROM events WHERE user_id = 42"
+    expect_value: 1
+```
+
+- `query` — any SQL; the output format is set automatically (`FORMAT JSON`).
+- `expect_value` — the single scalar result (first column of the first row).
+  Comparison is loose across the string/int boundary, because ClickHouse renders
+  64-bit integers as JSON strings under `FORMAT JSON` (so `count()` → `"1"`).
+- `expect_row` — deep subset match on the first row (`column → value`).
+- `expect_rows` — assert the query returned exactly N rows.
+
+Verification is retried briefly when the check also issues a request, so an
+asynchronous insert has time to land. (The container uses
+`user/password/db = noworries`. Declare it as `clickhouse` /
+`clickhouse:<tag>` → `clickhouse/clickhouse-server:24.8` by default.)
+
+## Cassandra / ScyllaDB
+
+Run a CQL query via `cqlsh` inside the container (no native driver — same
+in-container approach as SQL Server's `schema`). `SELECT` queries are rewritten
+to `SELECT JSON` internally so each row is parsed as JSON.
+
+```yaml
+- name: "order is written to the wide-column store"
+  request: { method: POST, path: /orders, body: { id: 42 } }
+  expect:  { status: 201 }
+  cassandra:
+    query: "SELECT count(*) FROM app.orders WHERE id = 42"
+    expect_value: 1
+```
+
+- `query` — any CQL `SELECT`.
+- `expect_value` — the single scalar result (single-column query).
+- `expect_row` — deep subset match on the first row (`column → value`).
+- `expect_rows` — assert exactly N rows.
+
+Works identically against ScyllaDB (declare `scylla` / `scylladb`), which ships
+the same `cqlsh`. Verification retries briefly for asynchronous writes.
+
+## RabbitMQ
+
+Inspect a queue via RabbitMQ's management HTTP API (port 15672). Uses the
+built-in HTTP client — no AMQP driver — so declaring a `rabbitmq` service (the
+default image is `rabbitmq:3.13-management`, which enables the API) is all it
+takes. noworries resolves the management port's host mapping automatically.
+
+```yaml
+- name: "publishing an order enqueues a job"
+  request: { method: POST, path: /orders, body: { sku: ABC } }
+  expect:  { status: 202 }
+  rabbitmq:
+    queue: "order-jobs"
+    min_messages: 1
+```
+
+- `queue` — the queue name to inspect.
+- `vhost` — virtual host (default `/`).
+- `expect_exists` — assert the queue exists (default `true`); set `false` to
+  assert absence.
+- `min_messages` / `expect_messages` — assert the queue holds at least / exactly
+  N messages (ready + unacknowledged).
+
+Verification is retried briefly when the check also issues a request, so an
+asynchronous publish has time to land. (The container uses
+`user/password = noworries`. A non-management image has no API — use the default
+`rabbitmq:3.13-management` or another `*-management` tag.)
+
 ## External calls (mocks)
 
 When an external declares a [`mock`](configuration.md#mocking-an-external-mock),
@@ -324,6 +402,7 @@ behaviour, retried for calls the app makes asynchronously.
       path: /charge               # exact path
       body_contains: { amount: 100 }   # deep-subset match on the recorded JSON body
       times: 1                    # exact count; omit for "at least one"
+      timeout_ms: 8000            # optional; how long to wait for an async call (default ~6s window)
 ```
 
 ## Logs
@@ -388,10 +467,15 @@ golden file. Run once with `--update-snapshots` to create/refresh the golden.
     ignore: [ "$.id", "$.createdAt" ]   # blank volatile fields before comparing
 ```
 
-### DB schema (`schema`, Postgres or MySQL)
+### DB schema (`schema`, Postgres / MySQL / SQL Server)
 
 Assert a table's columns (and optionally types) via `information_schema` — uses
-Postgres if declared, otherwise MySQL. On MySQL, `schema` is the database name.
+Postgres if declared, otherwise MySQL, otherwise SQL Server. On MySQL, `schema`
+is the database name; on SQL Server it is likewise treated as the database (a
+`USE` clause). Postgres/MySQL connect from the host; SQL Server is queried with
+`sqlcmd` inside the container (no host driver needed). Type names are matched
+loosely, including SQL Server aliases (`bit`→bool, `nvarchar`→text,
+`datetime2`→timestamp, `uniqueidentifier`→uuid).
 
 ```yaml
 - name: "orders table migrated correctly"

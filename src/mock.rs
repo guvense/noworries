@@ -100,11 +100,14 @@ pub fn start_mock(name: &str, spec: &MockSpec) -> Result<MockHandle> {
                 r.push(RecordedRequest {
                     method: method.clone(),
                     path: path.clone(),
-                    body,
+                    body: body.clone(),
                 });
             }
 
-            let response = build_response(&stubs, &method, &path);
+            let (response, delay_ms) = build_response(&stubs, &method, &path, &body);
+            if let Some(ms) = delay_ms {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             let _ = request.respond(response);
         }
     });
@@ -119,11 +122,14 @@ pub fn start_mock(name: &str, spec: &MockSpec) -> Result<MockHandle> {
 }
 
 /// Pick the first matching stub and build its response; default 200 empty.
+/// Returns the response and an optional artificial delay (ms) to apply first.
 fn build_response(
     stubs: &[crate::spec::MockStub],
     method: &str,
     path: &str,
-) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    req_body: &[u8],
+) -> (tiny_http::Response<std::io::Cursor<Vec<u8>>>, Option<u64>) {
+    let req_json: Option<Json> = serde_json::from_slice(req_body).ok();
     let stub = stubs.iter().find(|s| {
         let method_ok = s
             .when_
@@ -131,12 +137,25 @@ fn build_response(
             .as_ref()
             .map(|m| m.eq_ignore_ascii_case(method))
             .unwrap_or(true);
-        method_ok && s.when_.path == path
+        let path_ok = s.when_.path == path;
+        let body_ok = match &s.when_.body_contains {
+            None => true,
+            Some(expected) => req_json
+                .as_ref()
+                .map(|actual| crate::runner::matches_subset(&yaml_to_json(expected), actual))
+                .unwrap_or(false),
+        };
+        method_ok && path_ok && body_ok
     });
 
-    let (status, body, headers): (u16, Vec<u8>, Vec<(String, String)>) = match stub {
+    struct Built {
+        status: u16,
+        body: Vec<u8>,
+        headers: Vec<(String, String)>,
+        delay: Option<u64>,
+    }
+    let built = match stub {
         Some(s) => {
-            let status = s.respond.status.unwrap_or(200);
             let body = match &s.respond.body {
                 Some(serde_yaml::Value::String(text)) => text.clone().into_bytes(),
                 Some(other) => serde_json::to_vec(&yaml_to_json(other)).unwrap_or_default(),
@@ -148,10 +167,11 @@ fn build_response(
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            (status, body, headers)
+            Built { status: s.respond.status.unwrap_or(200), body, headers, delay: s.respond.delay_ms }
         }
-        None => (200, Vec::new(), Vec::new()),
+        None => Built { status: 200, body: Vec::new(), headers: Vec::new(), delay: None },
     };
+    let Built { status, body, headers, delay } = built;
 
     let mut resp = tiny_http::Response::from_data(body).with_status_code(status);
     let has_ct = headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
@@ -165,7 +185,7 @@ fn build_response(
             resp.add_header(h);
         }
     }
-    resp
+    (resp, delay)
 }
 
 fn yaml_to_json(v: &serde_yaml::Value) -> Json {

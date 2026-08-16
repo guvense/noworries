@@ -89,9 +89,14 @@ enum Command {
     },
     /// Parse + validate the spec without starting any containers.
     Validate,
-    /// Print the full `noworries.yml` field reference (bundled with this binary).
+    /// Print the `noworries.yml` field reference (markdown) or JSON Schema.
     #[command(alias = "schema")]
-    Spec,
+    Spec {
+        /// Output format: `md` (human reference) or `json` (JSON Schema for
+        /// editor completion / programmatic queries).
+        #[arg(long, value_parser = ["md", "json"], default_value = "md")]
+        format: String,
+    },
     /// List the files the AI changed (for scoping checks). `--all` = everything.
     Changed {
         /// Cover all tracked files (the "force"/regression scope).
@@ -483,10 +488,14 @@ fn template_for(feature: &str) -> Option<&'static str> {
 const SPEC_REFERENCE_CONFIG: &str = include_str!("../docs/configuration.md");
 const SPEC_REFERENCE_CHECKS: &str = include_str!("../docs/checks.md");
 
-fn cmd_spec() -> Result<i32> {
-    println!("{SPEC_REFERENCE_CONFIG}");
-    println!("\n---\n");
-    println!("{SPEC_REFERENCE_CHECKS}");
+fn cmd_spec(format: &str) -> Result<i32> {
+    if format == "json" {
+        println!("{}", noworries::spec::json_schema());
+    } else {
+        println!("{SPEC_REFERENCE_CONFIG}");
+        println!("\n---\n");
+        println!("{SPEC_REFERENCE_CHECKS}");
+    }
     Ok(0)
 }
 
@@ -844,6 +853,8 @@ fn run_checks_flow(
         dir: Path::new(dir).to_path_buf(),
         update_snapshots: cli.update_snapshots,
         http_capture: std::sync::Mutex::new(None),
+        compose_project: Some(handles.project_name.clone()),
+        compose_file: Some(handles.compose_file.clone()),
     };
     let results = runner::run_checks(selected, &ctx);
     let summary = report::print_results(results);
@@ -902,7 +913,7 @@ fn main() {
     let result = match &cli.command {
         Some(Command::Init { with }) => cmd_init(&cli.dir, with),
         Some(Command::Validate) => cmd_validate(&cli),
-        Some(Command::Spec) => cmd_spec(),
+        Some(Command::Spec { format }) => cmd_spec(format),
         Some(Command::Changed { all }) => cmd_changed(&cli.dir, *all, cli.json),
         Some(Command::InstallCommand { project }) => cmd_install_command(*project, &cli.dir),
         None => cmd_run(&cli),

@@ -59,6 +59,11 @@ pub struct RunnerContext {
     /// The most recent check `request` response body, so response-dependent
     /// assertions (e.g. `snapshot`) can read it. Set by `run_http` each check.
     pub http_capture: std::sync::Mutex<Option<String>>,
+    /// Compose project name + file, so checks can run a query *inside* a service
+    /// container via `docker compose exec` (used by backends whose native Rust
+    /// driver is too heavy to pull in — SQL Server, Cassandra). `None` in tests.
+    pub compose_project: Option<String>,
+    pub compose_file: Option<String>,
 }
 
 impl RunnerContext {
@@ -75,6 +80,8 @@ impl RunnerContext {
             dir: std::path::PathBuf::from("."),
             update_snapshots: false,
             http_capture: std::sync::Mutex::new(None),
+            compose_project: None,
+            compose_file: None,
         }
     }
 }
@@ -972,7 +979,16 @@ fn run_external_calls(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, o
     if check.external_calls.is_empty() {
         return;
     }
-    let deadline = Instant::now() + retry;
+    // Honor an explicit per-call `timeout_ms` (for async flows) — use the largest
+    // one requested, but never less than the default eventual-consistency window.
+    let explicit = check
+        .external_calls
+        .iter()
+        .filter_map(|c| c.timeout_ms)
+        .max()
+        .map(Duration::from_millis);
+    let window = explicit.map(|e| e.max(retry)).unwrap_or(retry);
+    let deadline = Instant::now() + window;
     let mut results = evaluate_external_calls(check, ctx);
     while !results.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(300));
@@ -1814,7 +1830,13 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
                 // have been set up by a prior check or an already-running app).
                 || check.metrics.is_some()
                 || check.traces.is_some()
-                || check.schema.is_some();
+                || check.schema.is_some()
+                // Datastore observers whose effect is eventually consistent: an
+                // async insert (ClickHouse/Cassandra) or RabbitMQ's management
+                // stats, which refresh on a delay after a publish.
+                || check.clickhouse.is_some()
+                || check.rabbitmq.is_some()
+                || check.cassandra.is_some();
             let retry_budget = observe_retry_budget(check, async_effect);
             run_db(check, ctx, retry_budget, &mut assertions);
             run_mysql_verify(check, ctx, retry_budget, &mut assertions);

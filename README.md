@@ -42,9 +42,9 @@ check the change it just made. Where noworries differs:
   consistency, Kafka topic auto-creation, subset matching — handled by a
   tested tool, not re-derived (and re-broken) in every hand-written test.
 - **Black-box, whole-app, language-agnostic.** It starts your *real* app
-  (`mvnw`/`go run`/`uvicorn`/`npm`) and pokes it from the outside — one tool
-  whether it's Spring, Go, FastAPI, or Node — instead of a per-language in-process
-  slice test.
+  (`mvnw`/`dotnet run`/`go run`/`rails`/`artisan`/`uvicorn`/`npm`) and pokes it
+  from the outside — one tool whether it's Spring, .NET, Go, Rails, Laravel,
+  Django, FastAPI, or Node — instead of a per-language in-process slice test.
 - **Built for the agent loop.** `noworries changed` scopes to what was just
   touched; a structured `results.json` (expected-vs-actual per assertion) lets the
   AI parse the failure and self-correct before you review.
@@ -181,10 +181,12 @@ writes the checks for you, runs them, and fixes the code if they fail. Use
 ```yaml
 version: 1
 services:
-  - postgres:16-alpine        # also: mysql, mongodb, redis, kafka, elastic
+  - postgres:16-alpine        # also: timescaledb, cockroachdb, mysql, mariadb, mssql,
+                              #       mongodb, redis, kafka, rabbitmq, elastic, opensearch,
+                              #       clickhouse, cassandra, scylladb
   - redis
 
-app:                          # optional; auto-detected (Spring/Go/FastAPI/Node)
+app:                          # optional; auto-detected (Spring/.NET/Go/Rails/Laravel/Django/FastAPI/Node)
   start: "./mvnw spring-boot:run"
   health: "/actuator/health"
 
@@ -206,20 +208,28 @@ check types: **[docs/checks.md](docs/checks.md)**.
 ## What it can verify
 
 **Services it stands up** (declare as `kind` or `kind:tag`):
-`postgres` · `mysql` · `mongodb` · `redis` · `kafka` · `elastic` (7 & 8).
+`postgres` · `timescaledb` · `cockroachdb` · `mysql` · `mariadb` · `mssql` ·
+`mongodb` · `redis` · `kafka` · `rabbitmq` · `elastic` (7 & 8) · `opensearch` ·
+`clickhouse` · `cassandra` · `scylladb`. Wire-compatible aliases reuse a peer's
+provider: `timescaledb` and `mariadb` map onto Postgres/MySQL, `scylladb` onto
+Cassandra — same provider/checks, different image. Every service boots with a
+Docker healthcheck and exports connection env to the app (`DATABASE_URL`,
+`RABBITMQ_URL`, `CLICKHOUSE_URL`, `CASSANDRA_CONTACT_POINTS`, …).
 
 **Frameworks it auto-detects** (or force with `app.framework`):
-Spring Boot · Go · FastAPI (Python) · Node.js. Non-JVM apps get conventional
-env vars (`DATABASE_URL`, `REDIS_URL`, `KAFKA_BROKERS`, …).
+Spring Boot · ASP.NET Core · Go · Ruby on Rails · Laravel · Django · FastAPI
+(Python) · Node.js. Non-JVM apps get conventional env vars (`DATABASE_URL`,
+`REDIS_URL`, `KAFKA_BROKERS`, …); Laravel also gets its native `DB_*` keys.
 
 **Check / assertion types** — combine any of these in one check:
 
 | Area | Types |
 | ---- | ----- |
 | HTTP | `request` + `expect` (status, `body_contains`, `max_ms` latency) |
-| SQL | `db` (Postgres), `mysql` (seed → query), `schema` (column/type diff, PG or MySQL) |
-| NoSQL / cache | `mongodb` (seed → find), `redis` (key/value) |
-| Streaming | `kafka` (produce / expect_message), `sse`, `websocket` |
+| SQL | `db` (Postgres), `mysql` (seed → query), `schema` (column/type diff — PG, MySQL, or SQL Server) |
+| NoSQL / cache | `mongodb` (seed → find), `redis` (key/value), `cassandra` (CQL query → `expect_value`/`expect_row`/`expect_rows`, incl. Scylla) |
+| Analytics | `clickhouse` (HTTP SQL query → `expect_value`/`expect_row`/`expect_rows`) |
+| Streaming | `kafka` (produce / expect_message), `rabbitmq` (queue depth via mgmt API), `sse`, `websocket` |
 | Search | `elastic` (template + insert/update/delete + query) |
 | APIs | `graphql`, `grpc` (via grpcurl) |
 | Observability | `metrics` (Prometheus), `traces` (OpenTelemetry via Jaeger/Tempo), `logs` |

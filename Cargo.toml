@@ -1,6 +1,6 @@
 [package]
 name = "noworries"
-version = "0.4.2"
+version = "0.10.0"
 edition = "2021"
 description = "Ephemeral infra harness that lets an AI verify the changes it just made — stand up the dependencies a feature needs, exercise them, and report READY/NOT READY."
 license = "MIT"
@@ -14,6 +14,9 @@ clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
+# JSON Schema generation for `noworries spec --format json` (editor completion +
+# programmatic schema query). Free-form YAML fields map to "any".
+schemars = "0.8"
 anyhow = "1"
 ctrlc = "3"
 ureq = { version = "2", default-features = false }

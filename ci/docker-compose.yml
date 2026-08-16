@@ -91,6 +91,35 @@ services:
       timeout: 5s
       retries: 40
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: noworries
+      CLICKHOUSE_PASSWORD: noworries
+      CLICKHOUSE_DB: noworries
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user noworries --password noworries -q 'SELECT 1' || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: noworries
+      RABBITMQ_DEFAULT_PASS: noworries
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
   # Flink session cluster for the flink_it integration test. No container
   # healthcheck (the image ships no curl/wget); the test gates on REST readiness
   # itself. The JobManager REST/UI is published on localhost:8081.

@@ -5,6 +5,8 @@ use std::path::Path;
 
 use super::{generic_env, Framework};
 use crate::lifecycle::ServiceEndpoint;
+use crate::services::mssql::MSSQL_SA_PASSWORD;
+use crate::services::rabbitmq::{RABBITMQ_PASSWORD, RABBITMQ_USER};
 use crate::services::{PG_DB, PG_PASSWORD, PG_USER};
 use crate::spec::ServiceKind;
 
@@ -81,6 +83,56 @@ impl Framework for SpringBoot {
                         format!("mongodb://127.0.0.1:{}", ep.host_port),
                     );
                 }
+                ServiceKind::Cockroach => {
+                    // Postgres-wire; single-node insecure uses root/defaultdb.
+                    m.insert(
+                        "SPRING_DATASOURCE_URL".to_string(),
+                        format!(
+                            "jdbc:postgresql://127.0.0.1:{}/defaultdb?sslmode=disable",
+                            ep.host_port
+                        ),
+                    );
+                    m.insert("SPRING_DATASOURCE_USERNAME".to_string(), "root".to_string());
+                    m.insert("SPRING_DATASOURCE_PASSWORD".to_string(), "".to_string());
+                }
+                ServiceKind::Mssql => {
+                    m.insert(
+                        "SPRING_DATASOURCE_URL".to_string(),
+                        format!(
+                            "jdbc:sqlserver://127.0.0.1:{};encrypt=true;trustServerCertificate=true",
+                            ep.host_port
+                        ),
+                    );
+                    m.insert("SPRING_DATASOURCE_USERNAME".to_string(), "sa".to_string());
+                    m.insert(
+                        "SPRING_DATASOURCE_PASSWORD".to_string(),
+                        MSSQL_SA_PASSWORD.to_string(),
+                    );
+                }
+                ServiceKind::Rabbitmq => {
+                    m.insert("SPRING_RABBITMQ_HOST".to_string(), "127.0.0.1".to_string());
+                    m.insert("SPRING_RABBITMQ_PORT".to_string(), ep.host_port.to_string());
+                    m.insert("SPRING_RABBITMQ_USERNAME".to_string(), RABBITMQ_USER.to_string());
+                    m.insert(
+                        "SPRING_RABBITMQ_PASSWORD".to_string(),
+                        RABBITMQ_PASSWORD.to_string(),
+                    );
+                }
+                ServiceKind::Cassandra => {
+                    m.insert(
+                        "SPRING_CASSANDRA_CONTACT_POINTS".to_string(),
+                        format!("127.0.0.1:{}", ep.host_port),
+                    );
+                    m.insert("SPRING_CASSANDRA_PORT".to_string(), ep.host_port.to_string());
+                    m.insert(
+                        "SPRING_CASSANDRA_LOCAL_DATACENTER".to_string(),
+                        "datacenter1".to_string(),
+                    );
+                }
+                // ClickHouse and OpenSearch have no ubiquitous Spring Boot
+                // auto-config keys; the framework-agnostic NOWORRIES_* vars from
+                // generic_env cover them.
+                ServiceKind::Clickhouse | ServiceKind::Opensearch => {}
             }
         }
         m

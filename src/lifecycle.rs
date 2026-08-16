@@ -17,6 +17,10 @@ pub struct ServiceEndpoint {
     pub kind: ServiceKind,
     pub host_port: u16,
     pub container_port: u16,
+    /// Resolved host mappings for the provider's secondary ports, keyed by
+    /// container port (e.g. `15672 -> <host>` for RabbitMQ's management API).
+    /// Empty for single-port services.
+    pub aux_ports: std::collections::BTreeMap<u16, u16>,
 }
 
 pub struct RunHandles {
@@ -36,6 +40,19 @@ fn base(file: &str, project: &str) -> Vec<String> {
         "-p".to_string(),
         project.to_string(),
     ]
+}
+
+/// Run a command inside a running service container via `docker compose exec -T`
+/// (no TTY). Lets checks query a datastore with the client already baked into
+/// its image — used where pulling a native Rust driver would be disproportionate
+/// (SQL Server's `sqlcmd`, Cassandra's `cqlsh`).
+pub fn compose_exec(file: &str, project: &str, service: &str, argv: &[&str]) -> docker::Output {
+    let mut args = base(file, project);
+    args.push("exec".to_string());
+    args.push("-T".to_string());
+    args.push(service.to_string());
+    args.extend(argv.iter().map(|s| s.to_string()));
+    docker::capture(&args)
 }
 
 /// Fail early with a clear message if docker / compose isn't usable.
@@ -195,11 +212,21 @@ pub fn up(compose: &GeneratedCompose, file: &str, health_timeout: Duration) -> R
             Some(p) => p,
             None => resolve_port(file, &project, &s.name, s.container_port)?,
         };
+        // Resolve any secondary ports the provider declared (e.g. RabbitMQ's
+        // management API) so live checks can reach them from the host.
+        let mut aux_ports = std::collections::BTreeMap::new();
+        if let Some(provider) = crate::services::provider_for(s.kind) {
+            for &cp in provider.aux_ports() {
+                let hp = resolve_port(file, &project, &s.name, cp)?;
+                aux_ports.insert(cp, hp);
+            }
+        }
         endpoints.push(ServiceEndpoint {
             service: s.name.clone(),
             kind: s.kind,
             host_port,
             container_port: s.container_port,
+            aux_ports,
         });
     }
 

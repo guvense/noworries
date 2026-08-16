@@ -21,6 +21,7 @@ fn endpoints(pg_port: u16) -> Vec<ServiceEndpoint> {
         kind: ServiceKind::Postgres,
         host_port: pg_port,
         container_port: 5432,
+        aux_ports: Default::default(),
     }]
 }
 

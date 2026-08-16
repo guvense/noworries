@@ -16,7 +16,10 @@ use serde_json::Value as Json;
 use crate::runner::{interpolate, AssertionResult, RunnerContext};
 use crate::spec::CheckSpec;
 
+pub mod cassandra;
+pub mod clickhouse;
 pub mod graphql;
+pub mod rabbitmq;
 pub mod grpc;
 pub mod metrics;
 pub mod schema;
@@ -39,6 +42,9 @@ pub fn registry() -> Vec<Box<dyn Assertion>> {
         Box::new(graphql::GraphQl),
         Box::new(metrics::Metrics),
         Box::new(schema::Schema),
+        Box::new(clickhouse::Clickhouse),
+        Box::new(rabbitmq::Rabbitmq),
+        Box::new(cassandra::Cassandra),
         Box::new(sse::Sse),
         Box::new(websocket::WebSocket),
         Box::new(grpc::Grpc),
@@ -67,6 +73,24 @@ pub(crate) fn fail(kind: &str, message: String, expected: Option<Json>, actual: 
 /// YAML value → JSON value (for comparing declared expectations uniformly).
 pub(crate) fn yaml_json(v: &serde_yaml::Value) -> Json {
     serde_json::to_value(v).unwrap_or(Json::Null)
+}
+
+/// Equal as JSON, or equal as scalar string forms. Datastores that speak over
+/// text/JSON transports blur the string/number line (ClickHouse renders 64-bit
+/// ints as JSON strings; `cqlsh`/`SELECT JSON` and delimited CLI output are all
+/// text), so `1` must match `"1"`.
+pub(crate) fn loose_scalar_eq(actual: &Json, expected: &Json) -> bool {
+    actual == expected || scalar_str(actual) == scalar_str(expected)
+}
+
+pub(crate) fn scalar_str(v: &Json) -> String {
+    match v {
+        Json::String(s) => s.clone(),
+        Json::Number(n) => n.to_string(),
+        Json::Bool(b) => b.to_string(),
+        Json::Null => "null".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Resolve a `path`-or-absolute-URL against the app, with `${VAR}` interpolation.

@@ -35,6 +35,7 @@ checks:
         kind: ServiceKind::Mysql,
         host_port: port,
         container_port: 3306,
+        aux_ports: Default::default(),
     }];
     let ctx = RunnerContext::new(0, endpoints);
 

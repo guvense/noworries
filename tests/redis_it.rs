@@ -16,8 +16,8 @@ use noworries::spec::{AppSpec, NoworriesSpec, ServiceKind};
 
 fn endpoints(pg: u16, redis: u16) -> Vec<ServiceEndpoint> {
     vec![
-        ServiceEndpoint { service: "postgres".into(), kind: ServiceKind::Postgres, host_port: pg, container_port: 5432 },
-        ServiceEndpoint { service: "redis".into(), kind: ServiceKind::Redis, host_port: redis, container_port: 6379 },
+        ServiceEndpoint { service: "postgres".into(), kind: ServiceKind::Postgres, host_port: pg, container_port: 5432, aux_ports: Default::default() },
+        ServiceEndpoint { service: "redis".into(), kind: ServiceKind::Redis, host_port: redis, container_port: 6379, aux_ports: Default::default() },
     ]
 }
 

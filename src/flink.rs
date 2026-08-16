@@ -55,6 +55,12 @@ pub fn in_network_coords(kind: ServiceKind) -> (&'static str, u16) {
         ServiceKind::Redis => ("redis", 6379),
         ServiceKind::Elastic => ("elastic", 9200),
         ServiceKind::Kafka => ("kafka", 9092),
+        ServiceKind::Cockroach => ("cockroach", 26257),
+        ServiceKind::Opensearch => ("opensearch", 9200),
+        ServiceKind::Mssql => ("mssql", 1433),
+        ServiceKind::Rabbitmq => ("rabbitmq", 5672),
+        ServiceKind::Clickhouse => ("clickhouse", 8123),
+        ServiceKind::Cassandra => ("cassandra", 9042),
     }
 }
 

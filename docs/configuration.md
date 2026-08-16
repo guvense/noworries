@@ -47,11 +47,35 @@ Required, non-empty list. Each entry is `kind` or `kind:tag`. Supported kinds:
 | `elasticsearch:7.17.22` | `docker.elastic.co/elasticsearch/elasticsearch:7.17.22` |
 | `mysql`             | `mysql:8.4`               |
 | `mysql:8.0`         | `mysql:8.0`               |
+| `mariadb`           | `mariadb:11`              |
+| `mariadb:11.4`      | `mariadb:11.4`            |
 | `mongodb` / `mongo` | `mongo:7`                 |
+| `timescaledb` / `timescale` | `timescale/timescaledb:2.17.2-pg16` |
+| `cockroachdb` / `cockroach` | `cockroachdb/cockroach:v24.2.0` |
+| `mssql` / `sqlserver` | `mcr.microsoft.com/mssql/server:2022-latest` |
+| `rabbitmq` / `rabbit` / `amqp` | `rabbitmq:3.13-management` |
+| `opensearch`        | `opensearchproject/opensearch:2.17.1` |
+| `clickhouse`        | `clickhouse/clickhouse-server:24.8` |
+| `cassandra`         | `cassandra:5.0`           |
+| `scylla` / `scylladb` | `scylladb/scylla:6.1`   |
 
 Note that `kafka:<tag>` expands to the **`apache/kafka`** repository (Kafka's
 official image) and `elastic`/`elasticsearch` expand to the official
 **`docker.elastic.co/elasticsearch/elasticsearch`** image — not the bare names.
+
+Several kinds are **wire-compatible aliases** that reuse a peer's provider and
+checks, differing only in the pulled image: `mariadb` maps onto MySQL,
+`timescaledb` onto Postgres, and `scylladb` onto Cassandra. `cockroachdb` also
+speaks the Postgres wire protocol but needs its own container config
+(`start-single-node --insecure`, port 26257, `root`/`defaultdb`), so it is a
+distinct kind rather than an alias.
+
+Each service boots with a Docker healthcheck and exports connection env to the
+app under test (e.g. `RABBITMQ_URL`/`AMQP_URL`, `CLICKHOUSE_URL`,
+`OPENSEARCH_URL`, `CASSANDRA_CONTACT_POINTS`, `MSSQL_*`). Live check runners
+that connect *from* noworries (e.g. `schema` against SQL Server, an AMQP/HTTP
+assertion for RabbitMQ, an HTTP query check for ClickHouse) are a follow-up
+layer — the provider layer above makes each service declarable and bootable.
 
 ## `app` (optional)
 
@@ -61,20 +85,31 @@ the framework from the files in your project root:
 | Framework      | Adapter name  | Detected by | Default start | Health | Port env |
 | -------------- | ------------- | ----------- | ------------- | ------ | -------- |
 | Spring Boot    | `spring-boot` | `pom.xml` / `build.gradle(.kts)` / `mvnw` / `gradlew` | `./mvnw spring-boot:run` (or `gradle`/`mvn` equivalent) | `/actuator/health` | `SERVER_PORT` |
+| ASP.NET Core   | `dotnet`      | a `*.csproj` / `*.fsproj` / `*.sln` in the root | `dotnet run` | TCP (`none`) | `ASPNETCORE_HTTP_PORTS` |
 | Go             | `go`          | `go.mod` | `go run .` | TCP (`none`) | `PORT` |
+| Ruby on Rails  | `rails`       | `bin/rails` or `config/application.rb` | `bin/rails server -b 0.0.0.0 -p ${PORT}` | TCP (`none`) | `PORT` |
+| Laravel (PHP)  | `laravel`     | `artisan` | `php artisan serve --host=0.0.0.0 --port=${PORT}` | TCP (`none`) | `PORT` |
+| Django (Python) | `django`     | `manage.py` | `python manage.py runserver 0.0.0.0:${PORT} --noreload` | TCP (`none`) | `PORT` |
 | FastAPI (Python) | `fastapi`   | `main.py` / `app.py`, or a `pyproject.toml`/`requirements.txt` mentioning fastapi/uvicorn | `uvicorn main:app --host 0.0.0.0 --port ${PORT}` | TCP (`none`) | `PORT` |
 | Node.js        | `node`        | `package.json` | `npm start` (or `node server.js`/`index.js`/`app.js`) | TCP (`none`) | `PORT` |
 
 Detection runs in that order, so a Spring Boot project that also ships a
-`package.json` (e.g. a JS frontend) still resolves to `spring-boot`. Set
-`app.framework` to force one explicitly.
+`package.json` (e.g. a JS frontend) still resolves to `spring-boot`, and a
+Django project that happens to have a `main.py` still resolves to `django`
+(its `manage.py` is checked first). Set `app.framework` to force one explicitly.
+
+Django, Rails, .NET and Go read the standard connection-string env vars
+(`DATABASE_URL`, `REDIS_URL`, `KAFKA_BROKERS`, ...). Laravel additionally gets
+its native discrete vars (`DB_CONNECTION`/`DB_HOST`/`DB_PORT`/`DB_DATABASE`/
+`DB_USERNAME`/`DB_PASSWORD`, `REDIS_HOST`/`REDIS_PORT`). The
+framework-agnostic `NOWORRIES_<KIND>_HOST`/`_PORT` fallbacks are always present.
 
 | Field           | Default                              | Meaning |
 | --------------- | ------------------------------------ | ------- |
 | `start`         | auto-detected from the framework     | Shell command to start the app. |
-| `health`        | framework default (`/actuator/health` for Spring; `none` for Go/FastAPI/Node) | Path polled until it returns 2xx before checks run. Set to `none` to skip HTTP and just wait for the port to accept TCP. |
-| `framework`     | auto-detect                          | Force a specific framework adapter by name (`spring-boot`, `go`, `fastapi`, `node`). |
-| `port_env`      | framework default (`SERVER_PORT` for Spring; `PORT` for Go/FastAPI/Node) | Env var the app reads for its HTTP port. |
+| `health`        | framework default (`/actuator/health` for Spring; `none` for the rest) | Path polled until it returns 2xx before checks run. Set to `none` to skip HTTP and just wait for the port to accept TCP. |
+| `framework`     | auto-detect                          | Force a specific framework adapter by name (`spring-boot`, `dotnet`, `go`, `rails`, `laravel`, `django`, `fastapi`, `node`). |
+| `port_env`      | framework default (`SERVER_PORT` for Spring; `ASPNETCORE_HTTP_PORTS` for .NET; `PORT` for the rest) | Env var the app reads for its HTTP port. |
 | `ready_timeout` | `120`                                | Seconds to wait for the app to become ready. |
 | `env`           | none                                 | Extra environment variables passed to the app process. |
 
@@ -218,15 +253,22 @@ externals:
     url_env: PAYMENTS_BASE_URL      # the mock's URL is injected here (and conventionally)
     mock:
       stubs:
+        - when: { method: POST, path: /charge, body_contains: { amount: 200 } }   # match by body too
+          respond: { status: 402, body: { error: "too big" } }
         - when: { method: POST, path: /charge }
           respond: { status: 201, body: { id: "ch_1", status: "ok" } }
+        - when: { path: /slow }
+          respond: { status: 200, delay_ms: 3000 }   # artificial latency (test client timeout/circuit-breaker)
         - when: { path: /health }   # method omitted = any
           respond: { status: 200 }
 ```
 
-Stubs match top-to-bottom, first match wins (exact `path`, query ignored; `method`
-optional). An unmatched request is still recorded and answered `200`. `respond`:
-`status` (default 200), `body` (JSON), `headers`.
+Stubs match top-to-bottom, first match wins. `when`: `path` (exact, query ignored),
+`method` (optional = any), `body_contains` (optional deep-subset match on the
+request JSON body — so the same path can answer differently per payload; put
+specific body stubs before a catch-all). An unmatched request is still recorded
+and answered `200` empty. `respond`: `status` (default 200), `body` (JSON),
+`headers`, `delay_ms` (latency before replying).
 
 ## `auth` (optional)
 

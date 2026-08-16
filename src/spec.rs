@@ -13,6 +13,16 @@ use serde::Deserialize;
 
 pub const SPEC_FILENAME: &str = "noworries.yml";
 
+/// A JSON Schema for the on-disk `noworries.yml`, generated from the actual
+/// deserialized types — so it always matches the installed binary's accepted
+/// schema. Free-form YAML fields (bodies, expectations, messages) are typed as
+/// `any`. Used by `noworries spec --format json` for editor completion and
+/// programmatic queries (`.definitions.MockStub.properties`).
+pub fn json_schema() -> String {
+    let schema = schemars::schema_for!(RawSpec);
+    serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKind {
     Postgres,
@@ -21,6 +31,12 @@ pub enum ServiceKind {
     Elastic,
     Mysql,
     Mongodb,
+    Cockroach,
+    Opensearch,
+    Mssql,
+    Rabbitmq,
+    Clickhouse,
+    Cassandra,
 }
 
 impl ServiceKind {
@@ -32,6 +48,12 @@ impl ServiceKind {
             ServiceKind::Elastic => "elastic",
             ServiceKind::Mysql => "mysql",
             ServiceKind::Mongodb => "mongodb",
+            ServiceKind::Cockroach => "cockroach",
+            ServiceKind::Opensearch => "opensearch",
+            ServiceKind::Mssql => "mssql",
+            ServiceKind::Rabbitmq => "rabbitmq",
+            ServiceKind::Clickhouse => "clickhouse",
+            ServiceKind::Cassandra => "cassandra",
         }
     }
 
@@ -41,8 +63,23 @@ impl ServiceKind {
             "kafka" => Some(ServiceKind::Kafka),
             "redis" => Some(ServiceKind::Redis),
             "elastic" | "elasticsearch" => Some(ServiceKind::Elastic),
-            "mysql" => Some(ServiceKind::Mysql),
+            // MariaDB speaks the MySQL wire protocol, so it reuses the MySQL
+            // provider/client; only the pulled image differs (see parse_service_decl).
+            "mysql" | "mariadb" => Some(ServiceKind::Mysql),
             "mongodb" | "mongo" => Some(ServiceKind::Mongodb),
+            // CockroachDB and TimescaleDB both speak the Postgres wire protocol.
+            // Timescale is a true drop-in (same image family/env), so it reuses
+            // the Postgres provider via a different image; Cockroach needs its
+            // own container config and gets its own kind.
+            "cockroach" | "cockroachdb" => Some(ServiceKind::Cockroach),
+            "timescale" | "timescaledb" => Some(ServiceKind::Postgres),
+            "opensearch" => Some(ServiceKind::Opensearch),
+            "mssql" | "sqlserver" => Some(ServiceKind::Mssql),
+            "rabbitmq" | "rabbit" | "amqp" => Some(ServiceKind::Rabbitmq),
+            "clickhouse" => Some(ServiceKind::Clickhouse),
+            // ScyllaDB is CQL-wire-compatible with Cassandra, so it reuses the
+            // Cassandra provider with the `scylladb/scylla` image.
+            "cassandra" | "scylla" | "scylladb" => Some(ServiceKind::Cassandra),
             _ => None,
         }
     }
@@ -67,6 +104,12 @@ pub fn default_repo(kind: ServiceKind) -> &'static str {
         ServiceKind::Elastic => "docker.elastic.co/elasticsearch/elasticsearch",
         ServiceKind::Mysql => "mysql",
         ServiceKind::Mongodb => "mongo",
+        ServiceKind::Cockroach => "cockroachdb/cockroach",
+        ServiceKind::Opensearch => "opensearchproject/opensearch",
+        ServiceKind::Mssql => "mcr.microsoft.com/mssql/server",
+        ServiceKind::Rabbitmq => "rabbitmq",
+        ServiceKind::Clickhouse => "clickhouse/clickhouse-server",
+        ServiceKind::Cassandra => "cassandra",
     }
 }
 
@@ -79,6 +122,12 @@ pub fn default_image(kind: ServiceKind) -> &'static str {
         ServiceKind::Elastic => "docker.elastic.co/elasticsearch/elasticsearch:8.13.4",
         ServiceKind::Mysql => "mysql:8.4",
         ServiceKind::Mongodb => "mongo:7",
+        ServiceKind::Cockroach => "cockroachdb/cockroach:v24.2.0",
+        ServiceKind::Opensearch => "opensearchproject/opensearch:2.17.1",
+        ServiceKind::Mssql => "mcr.microsoft.com/mssql/server:2022-latest",
+        ServiceKind::Rabbitmq => "rabbitmq:3.13-management",
+        ServiceKind::Clickhouse => "clickhouse/clickhouse-server:24.8",
+        ServiceKind::Cassandra => "cassandra:5.0",
     }
 }
 
@@ -89,14 +138,32 @@ fn parse_service_decl(raw: &str) -> Result<ServiceDecl> {
     }
     let mut parts = value.splitn(2, ':');
     let kind_token = parts.next().unwrap_or("");
-    let kind = ServiceKind::from_token(kind_token)
-        .ok_or_else(|| anyhow!("unsupported service \"{value}\". supported: postgres, kafka, redis"))?;
+    let kind = ServiceKind::from_token(kind_token).ok_or_else(|| {
+        anyhow!(
+            "unsupported service \"{value}\". supported: postgres, timescaledb, cockroachdb, mysql, mariadb, mssql, mongodb, redis, kafka, rabbitmq, elasticsearch, opensearch, clickhouse, cassandra, scylladb"
+        )
+    })?;
     let tag = parts.next().map(|s| s.to_string());
-    // Expand "<kind>:<tag>" to the kind's real repository, e.g.
+    // Most tokens map onto their kind's default repository, but a few are
+    // wire-compatible aliases that reuse a kind's provider while pulling a
+    // different image (e.g. "mariadb" -> ServiceKind::Mysql, but the `mariadb`
+    // image, not `mysql`).
+    let (repo, default_img): (&str, String) = match kind_token.to_ascii_lowercase().as_str() {
+        "mariadb" => ("mariadb", "mariadb:11".to_string()),
+        // Timescale maps onto the Postgres kind but pulls the TimescaleDB image
+        // (Postgres + the timescaledb extension pre-installed).
+        "timescale" | "timescaledb" => {
+            ("timescale/timescaledb", "timescale/timescaledb:2.17.2-pg16".to_string())
+        }
+        // Scylla maps onto the Cassandra kind but pulls the ScyllaDB image.
+        "scylla" | "scylladb" => ("scylladb/scylla", "scylladb/scylla:6.1".to_string()),
+        _ => (default_repo(kind), default_image(kind).to_string()),
+    };
+    // Expand "<kind>:<tag>" to the resolved repository, e.g.
     // "kafka:3.7" -> "apache/kafka:3.7"; bare "<kind>" -> the default image.
     let image = match &tag {
-        Some(t) => format!("{}:{}", default_repo(kind), t),
-        None => default_image(kind).to_string(),
+        Some(t) => format!("{repo}:{t}"),
+        None => default_img,
     };
     Ok(ServiceDecl { kind, image, tag, raw: value.to_string() })
 }
@@ -104,7 +171,7 @@ fn parse_service_decl(raw: &str) -> Result<ServiceDecl> {
 /// How to launch the app under test. All optional: `start` is auto-detected
 /// from the resolved framework when omitted; `framework` forces a specific
 /// framework instead of auto-detecting.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AppSpec {
     #[serde(default)]
@@ -125,7 +192,7 @@ pub struct AppSpec {
 /// (jobmanager + taskmanager) onto which one or more jobs are built and
 /// submitted over the REST API before the checks run. Use this **instead of**
 /// `app` when the thing under test is a Flink job rather than an HTTP server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlinkSpec {
     /// Flink image (default `flink:1.19`).
@@ -146,7 +213,7 @@ pub struct FlinkSpec {
 }
 
 /// One Flink job: optionally built, then uploaded and run on the cluster.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlinkJob {
     /// Optional label for reporting.
@@ -170,7 +237,7 @@ pub struct FlinkJob {
     pub parallelism: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HttpRequestSpec {
     pub method: String,
@@ -178,26 +245,29 @@ pub struct HttpRequestSpec {
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub body: Option<serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HttpExpectSpec {
     #[serde(default)]
     pub status: Option<u16>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub body_contains: Option<serde_yaml::Value>,
     /// Assert the response arrived within this many milliseconds (latency SLO).
     #[serde(default, rename = "max_ms")]
     pub max_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DbAssertion {
     pub query: String,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_row: Option<serde_yaml::Value>,
     #[serde(default)]
     pub expect_row_count: Option<i64>,
@@ -206,7 +276,7 @@ pub struct DbAssertion {
 /// Kafka assertion. Supports producing a message to a topic (to exercise a
 /// consumer the feature added) and/or expecting a message on a topic (to
 /// verify a producer the feature added).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaAssertion {
     #[serde(default)]
@@ -215,19 +285,21 @@ pub struct KafkaAssertion {
     pub expect_message: Option<KafkaExpect>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaProduce {
     pub topic: String,
+    #[schemars(with = "serde_json::Value")]
     pub message: serde_yaml::Value,
     #[serde(default)]
     pub key: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaExpect {
     pub topic: String,
+    #[schemars(with = "serde_json::Value")]
     pub contains: serde_yaml::Value,
     #[serde(default, rename = "timeout_ms")]
     pub timeout_ms: Option<u64>,
@@ -241,7 +313,7 @@ pub struct KafkaExpect {
 /// the check's ordinary observe assertions (`db`/`mysql`/`mongodb`/`elastic`
 /// `expect_*count*`, etc.). Extensible: `kind` resolves to an edge-case strategy,
 /// and new kinds are added without touching this struct.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioSpec {
     /// `burst` | `concurrent` | `duplicates` | `out_of_order`.
@@ -269,25 +341,28 @@ pub struct ScenarioSpec {
 /// The Kafka target + message template for a [`ScenarioSpec`]. The `key` and
 /// `message` templates may reference `${seq}` (global 0-based index), `${i}`
 /// (per-key sequence), `${key}` (assigned key value), and `${uuid}` (unique id).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioKafka {
     pub topic: String,
     #[serde(default)]
     pub key: Option<String>,
+    #[schemars(with = "serde_json::Value")]
     pub message: serde_yaml::Value,
 }
 
 /// Redis assertion: check a key exists and/or its (possibly JSON) value matches.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedisAssertion {
     pub key: String,
     #[serde(default)]
     pub expect_exists: Option<bool>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_value: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_value_contains: Option<serde_yaml::Value>,
 }
 
@@ -295,31 +370,34 @@ pub struct RedisAssertion {
 /// app-created indices pick up the right mapping). The `body` is generated by
 /// Claude from the code, or pasted from production. `legacy` uses the old
 /// `_template` API (ES < 7.8); otherwise `_index_template` (ES 7.8+ and 8).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticTemplate {
     pub name: String,
+    #[schemars(with = "serde_json::Value")]
     pub body: serde_yaml::Value,
     #[serde(default)]
     pub legacy: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticInsert {
     #[serde(default)]
     pub id: Option<String>,
+    #[schemars(with = "serde_json::Value")]
     pub document: serde_yaml::Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticUpdate {
     pub id: String,
+    #[schemars(with = "serde_json::Value")]
     pub document: serde_yaml::Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticDelete {
     pub id: String,
@@ -328,7 +406,7 @@ pub struct ElasticDelete {
 /// A noworries-run Elasticsearch operation (setup or trigger). Exactly one of
 /// `insert` / `update` / `delete` is set per list entry, e.g.
 /// `- insert: { id: "X1", document: { ... } }`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticOp {
     #[serde(default)]
@@ -341,7 +419,7 @@ pub struct ElasticOp {
 
 /// Elasticsearch assertion. Supports applying a template, running
 /// insert/update/delete operations, and verifying a document or a search.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ElasticAssertion {
     pub index: String,
@@ -356,9 +434,11 @@ pub struct ElasticAssertion {
     #[serde(default)]
     pub expect_exists: Option<bool>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_source_contains: Option<serde_yaml::Value>,
     /// Verify via a search: the Elasticsearch query DSL body (the `query` value).
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub query: Option<serde_yaml::Value>,
     #[serde(default)]
     pub expect_hits: Option<i64>,
@@ -369,7 +449,7 @@ pub struct ElasticAssertion {
 /// is a new field + a new arm in the resolver — nothing else changes. Set the
 /// one(s) you need; string values support `${ENV_VAR}` interpolation so secrets
 /// stay out of the repo.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSpec {
     /// Log in to an endpoint, extract a token, and send it as a header.
@@ -386,7 +466,7 @@ pub struct AuthSpec {
     pub api_key: Option<AuthApiKey>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthLogin {
     pub request: HttpRequestSpec,
@@ -402,7 +482,7 @@ pub struct AuthLogin {
     pub scheme: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthBearer {
     pub token: String,
@@ -412,14 +492,14 @@ pub struct AuthBearer {
     pub scheme: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthBasic {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthApiKey {
     /// Send the key in this header (e.g. `X-API-Key`). Defaults to `X-API-Key`
@@ -439,7 +519,7 @@ pub struct AuthApiKey {
 /// per-auth `*_env`) and under conventional `NOWORRIES_EXTERNAL_<NAME>_*` names.
 /// All string values support `${VAR}` interpolation, so secrets live in the
 /// gitignored `.noworries.env` and are prompted for when missing.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalSpec {
     /// Logical name; drives the conventional env-var prefix
@@ -466,7 +546,7 @@ pub struct ExternalSpec {
 }
 
 /// In-process mock of an external dependency.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MockSpec {
     /// Response rules, matched top-to-bottom; the first match wins. An unmatched
@@ -475,7 +555,7 @@ pub struct MockSpec {
     pub stubs: Vec<MockStub>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MockStub {
     #[serde(rename = "when")]
@@ -485,7 +565,7 @@ pub struct MockStub {
 }
 
 /// Match condition for a [`MockStub`].
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MockWhen {
     /// HTTP method to match (case-insensitive); omit to match any.
@@ -493,10 +573,17 @@ pub struct MockWhen {
     pub method: Option<String>,
     /// Request path to match exactly (query string ignored).
     pub path: String,
+    /// Deep-subset match against the request's JSON body — so the same
+    /// method+path can return different responses per payload (e.g. `amount: 100`
+    /// vs `amount: 200`). Stubs are tried top-to-bottom; put the specific ones
+    /// (with `body_contains`) before a catch-all.
+    #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub body_contains: Option<serde_yaml::Value>,
 }
 
 /// Canned response for a [`MockStub`].
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MockRespond {
     /// HTTP status to return (default 200).
@@ -504,15 +591,20 @@ pub struct MockRespond {
     pub status: Option<u16>,
     /// JSON body to return (a plain string is sent as-is).
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub body: Option<serde_yaml::Value>,
     /// Extra response headers.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// Artificial latency before responding (ms) — to test client timeout /
+    /// circuit-breaker behaviour.
+    #[serde(default, rename = "delay_ms")]
+    pub delay_ms: Option<u64>,
 }
 
 /// Auth for an [`ExternalSpec`]. Set the one style the dependency uses. Each
 /// materializes both the raw parts and a ready-to-send header value.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalAuth {
     #[serde(default)]
@@ -525,7 +617,7 @@ pub struct ExternalAuth {
 
 /// Basic auth. Sets `_USER`/`_PASSWORD` (raw) and `_AUTHORIZATION` =
 /// `Basic base64(user:pass)`. Optional `*_env` also aliases to app-specific names.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalBasic {
     pub username: String,
@@ -540,7 +632,7 @@ pub struct ExternalBasic {
 }
 
 /// Bearer/token auth. Sets `_TOKEN` (raw) and `_AUTHORIZATION` = `<scheme> <token>`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalBearer {
     pub token: String,
@@ -555,7 +647,7 @@ pub struct ExternalBearer {
 
 /// API-key auth. Sets `_API_KEY` (raw value) and `_API_KEY_HEADER` (the header
 /// name the app should use, default `X-API-Key`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalApiKey {
     pub value: String,
@@ -569,7 +661,7 @@ pub struct ExternalApiKey {
 /// MySQL assertion. `seed` statements run BEFORE the request (to set up data);
 /// `query` + `expect_row`/`expect_row_count` verify state afterwards. This is
 /// the "seed data -> hit the API -> check what changed" flow.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MySqlAssertion {
     /// Raw SQL statements executed before the request, in order (INSERT/UPDATE/
@@ -580,6 +672,7 @@ pub struct MySqlAssertion {
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_row: Option<serde_yaml::Value>,
     #[serde(default)]
     pub expect_row_count: Option<i64>,
@@ -587,28 +680,32 @@ pub struct MySqlAssertion {
 
 /// A noworries-run MongoDB operation (seed/trigger). Exactly one of
 /// `insert` / `update` / `delete` per entry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MongoOp {
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub insert: Option<serde_yaml::Value>,
     #[serde(default)]
     pub update: Option<MongoUpdate>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub delete: Option<serde_yaml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MongoUpdate {
+    #[schemars(with = "serde_json::Value")]
     pub filter: serde_yaml::Value,
     /// Fields to `$set` on the matched documents.
+    #[schemars(with = "serde_json::Value")]
     pub set: serde_yaml::Value,
 }
 
 /// MongoDB assertion. `seed` operations run before the request; `find` +
 /// `expect_doc_contains` / `expect_count` verify afterwards.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MongoAssertion {
     pub database: String,
@@ -617,14 +714,16 @@ pub struct MongoAssertion {
     pub seed: Vec<MongoOp>,
     /// Filter (Mongo query document) used for verification.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub find: Option<serde_yaml::Value>,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_doc_contains: Option<serde_yaml::Value>,
     #[serde(default)]
     pub expect_count: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CheckSpec {
     pub name: String,
@@ -672,6 +771,12 @@ pub struct CheckSpec {
     pub grpc: Option<GrpcAssertion>,
     #[serde(default)]
     pub traces: Option<TracesAssertion>,
+    #[serde(default)]
+    pub clickhouse: Option<ClickhouseAssertion>,
+    #[serde(default)]
+    pub rabbitmq: Option<RabbitmqAssertion>,
+    #[serde(default)]
+    pub cassandra: Option<CassandraAssertion>,
 }
 
 fn default_true() -> bool {
@@ -679,7 +784,7 @@ fn default_true() -> bool {
 }
 
 /// GraphQL query/mutation over HTTP POST; asserts on `data` and `errors`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GraphqlAssertion {
     /// Endpoint path (relative to the app) or absolute URL. Default `/graphql`.
@@ -687,9 +792,11 @@ pub struct GraphqlAssertion {
     pub path: String,
     pub query: String,
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub variables: Option<serde_yaml::Value>,
     /// Deep-subset match against the response `data`.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_data: Option<serde_yaml::Value>,
     /// Fail if the response has a non-empty `errors` array (default true).
     #[serde(default = "default_true")]
@@ -702,7 +809,7 @@ fn default_graphql_path() -> String {
 
 /// Prometheus metric assertion: scrape a metrics endpoint, match one series,
 /// and compare its value.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsAssertion {
     /// Metrics endpoint path or absolute URL. Default `/metrics`.
@@ -724,7 +831,7 @@ fn default_metrics_path() -> String {
 }
 
 /// Golden-file assertion on the check's HTTP `request` response body.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotAssertion {
     /// Golden file path (relative to the project dir).
@@ -735,7 +842,7 @@ pub struct SnapshotAssertion {
 }
 
 /// Postgres schema assertion: check a table's columns.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaAssertion {
     pub table: String,
@@ -750,29 +857,98 @@ pub struct SchemaAssertion {
     pub has_columns: Vec<String>,
 }
 
+/// ClickHouse assertion: run a SQL query over the HTTP interface (port 8123)
+/// and check the result. Reuses the existing `ureq` client — no native driver.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClickhouseAssertion {
+    /// SQL query to run (e.g. `SELECT count() FROM events WHERE user_id = 42`).
+    pub query: String,
+    /// Assert the query returns exactly this many rows.
+    #[serde(default, rename = "expect_rows")]
+    pub expect_rows: Option<usize>,
+    /// Assert the first row equals this `column -> value` map (subset match,
+    /// loose type compare — ClickHouse returns 64-bit ints as JSON strings).
+    #[serde(default, rename = "expect_row")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub expect_row: Option<serde_yaml::Value>,
+    /// Assert the single scalar result (first column of the first row) equals
+    /// this value. Handy for `SELECT count() ...`.
+    #[serde(default, rename = "expect_value")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub expect_value: Option<serde_yaml::Value>,
+}
+
+/// Cassandra assertion: run a CQL query via `cqlsh` inside the container and
+/// check the result. Uses `docker compose exec` — no native CQL driver. Also
+/// covers ScyllaDB (same kind, same `cqlsh`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CassandraAssertion {
+    /// CQL query (e.g. `SELECT count(*) FROM app.orders WHERE id = 42`). A
+    /// `SELECT` is rewritten to `SELECT JSON` internally for parseable output.
+    pub query: String,
+    /// Assert the query returns exactly this many rows.
+    #[serde(default, rename = "expect_rows")]
+    pub expect_rows: Option<usize>,
+    /// Assert the first row equals this `column -> value` map (subset, loose
+    /// type compare).
+    #[serde(default, rename = "expect_row")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub expect_row: Option<serde_yaml::Value>,
+    /// Assert the single scalar result (single-column query) equals this value.
+    #[serde(default, rename = "expect_value")]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub expect_value: Option<serde_yaml::Value>,
+}
+
+/// RabbitMQ assertion: inspect a queue via the management HTTP API (port 15672).
+/// Reuses the existing `ureq` client — no AMQP driver.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RabbitmqAssertion {
+    /// Queue name to inspect.
+    pub queue: String,
+    /// Virtual host (default `/`).
+    #[serde(default)]
+    pub vhost: Option<String>,
+    /// Assert the queue exists (default `true`). Set `false` to assert absence.
+    #[serde(default, rename = "expect_exists")]
+    pub expect_exists: Option<bool>,
+    /// Assert the queue holds at least this many messages (ready + unacked).
+    #[serde(default)]
+    pub min_messages: Option<u64>,
+    /// Assert the queue holds exactly this many messages.
+    #[serde(default)]
+    pub expect_messages: Option<u64>,
+}
+
 /// Server-Sent-Events assertion: read an event stream until a matching event.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SseAssertion {
     /// Stream path (relative to the app) or absolute URL.
     pub path: String,
     /// Deep-subset match against an event's `data` (parsed as JSON).
+    #[schemars(with = "serde_json::Value")]
     pub contains: serde_yaml::Value,
     #[serde(default, rename = "timeout_ms")]
     pub timeout_ms: Option<u64>,
 }
 
 /// WebSocket assertion: connect, optionally send a message, await a match.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WebsocketAssertion {
     /// `ws://`/`wss://` URL, or a relative path (→ `ws://127.0.0.1:<app>`).
     pub url: String,
     /// Message to send on connect (JSON; a plain string is sent as text).
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub send: Option<serde_yaml::Value>,
     /// Deep-subset match against a received message (parsed as JSON).
     #[serde(default, rename = "expect_message")]
+    #[schemars(with = "serde_json::Value")]
     pub expect_message: serde_yaml::Value,
     #[serde(default, rename = "timeout_ms")]
     pub timeout_ms: Option<u64>,
@@ -780,7 +956,7 @@ pub struct WebsocketAssertion {
 
 /// gRPC assertion via `grpcurl` (shelled out). Requires `grpcurl` on PATH and
 /// server reflection, or explicit `protos`/`import_paths`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcAssertion {
     /// `host:port` (supports `${VAR}`).
@@ -789,9 +965,11 @@ pub struct GrpcAssertion {
     pub method: String,
     /// Request message as JSON.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub data: Option<serde_yaml::Value>,
     /// Deep-subset match against the response JSON.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub expect_contains: Option<serde_yaml::Value>,
     /// Use plaintext (no TLS). Default true.
     #[serde(default = "default_true")]
@@ -806,7 +984,7 @@ pub struct GrpcAssertion {
 
 /// OpenTelemetry trace assertion: query a Jaeger/Tempo-compatible HTTP API and
 /// assert matching traces exist.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TracesAssertion {
     /// Trace-query URL (e.g. Jaeger `http://127.0.0.1:16686/api/traces`).
@@ -825,7 +1003,7 @@ pub struct TracesAssertion {
 }
 
 /// Assertions against the app's captured stdout/stderr log.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LogAssertion {
     /// Substrings that must ALL appear in the log.
@@ -837,7 +1015,7 @@ pub struct LogAssertion {
 }
 
 /// Assert the app made a matching request to a mocked external.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalCallAssertion {
     /// Which external's mock to inspect (matches `externals[].name`).
@@ -849,14 +1027,20 @@ pub struct ExternalCallAssertion {
     pub path: String,
     /// Deep-subset match against the recorded request's JSON body.
     #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
     pub body_contains: Option<serde_yaml::Value>,
     /// Exact number of matching calls required; omit for "at least one".
     #[serde(default)]
     pub times: Option<usize>,
+    /// How long to wait for the app to make the call (ms), for asynchronous
+    /// flows. Omit to use the check's default eventual-consistency window (~6s,
+    /// scaled up by a scenario's size).
+    #[serde(default, rename = "timeout_ms")]
+    pub timeout_ms: Option<u64>,
 }
 
 /// Raw shape as it appears on disk (services are strings here).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RawSpec {
     version: u32,
@@ -996,7 +1180,85 @@ mod tests {
 
     #[test]
     fn unknown_service_is_rejected() {
-        assert!(NoworriesSpec::parse("version: 1\nservices: [mariadb:11]\n").is_err());
+        assert!(NoworriesSpec::parse("version: 1\nservices: [nats:2]\n").is_err());
+    }
+
+    #[test]
+    fn cockroach_tokens_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [cockroach, cockroachdb:v24.2.0]\n");
+        assert_eq!(s[0].kind, ServiceKind::Cockroach);
+        assert_eq!(s[0].image, "cockroachdb/cockroach:v24.2.0");
+        assert_eq!(s[1].kind, ServiceKind::Cockroach);
+        assert_eq!(s[1].image, "cockroachdb/cockroach:v24.2.0");
+    }
+
+    #[test]
+    fn timescale_reuses_postgres_kind_with_timescale_image() {
+        // TimescaleDB is Postgres + an extension, so it maps onto the Postgres
+        // provider/client but must pull the `timescale/timescaledb` image.
+        let s = parse_services("version: 1\nservices: [timescaledb, timescale:2.17.2-pg16]\n");
+        assert_eq!(s[0].kind, ServiceKind::Postgres);
+        assert_eq!(s[0].image, "timescale/timescaledb:2.17.2-pg16");
+        assert_eq!(s[1].kind, ServiceKind::Postgres);
+        assert_eq!(s[1].image, "timescale/timescaledb:2.17.2-pg16");
+    }
+
+    #[test]
+    fn opensearch_token_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [opensearch, opensearch:2.17.1]\n");
+        assert_eq!(s[0].kind, ServiceKind::Opensearch);
+        assert_eq!(s[0].image, "opensearchproject/opensearch:2.17.1");
+        assert_eq!(s[1].image, "opensearchproject/opensearch:2.17.1");
+    }
+
+    #[test]
+    fn mssql_tokens_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [mssql, sqlserver:2022-latest]\n");
+        assert_eq!(s[0].kind, ServiceKind::Mssql);
+        assert_eq!(s[0].image, "mcr.microsoft.com/mssql/server:2022-latest");
+        assert_eq!(s[1].kind, ServiceKind::Mssql);
+        assert_eq!(s[1].image, "mcr.microsoft.com/mssql/server:2022-latest");
+    }
+
+    #[test]
+    fn rabbitmq_tokens_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [rabbitmq, rabbit, amqp]\n");
+        assert_eq!(s[0].kind, ServiceKind::Rabbitmq);
+        assert_eq!(s[0].image, "rabbitmq:3.13-management");
+        assert_eq!(s[1].kind, ServiceKind::Rabbitmq);
+        assert_eq!(s[2].kind, ServiceKind::Rabbitmq);
+    }
+
+    #[test]
+    fn clickhouse_token_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [clickhouse, clickhouse:24.8]\n");
+        assert_eq!(s[0].kind, ServiceKind::Clickhouse);
+        assert_eq!(s[0].image, "clickhouse/clickhouse-server:24.8");
+        assert_eq!(s[1].image, "clickhouse/clickhouse-server:24.8");
+    }
+
+    #[test]
+    fn cassandra_and_scylla_tokens_and_image_expansion() {
+        let s = parse_services("version: 1\nservices: [cassandra, scylla, scylladb:6.1]\n");
+        assert_eq!(s[0].kind, ServiceKind::Cassandra);
+        assert_eq!(s[0].image, "cassandra:5.0");
+        // Scylla is CQL-wire-compatible, so it reuses the Cassandra kind with
+        // the scylladb image.
+        assert_eq!(s[1].kind, ServiceKind::Cassandra);
+        assert_eq!(s[1].image, "scylladb/scylla:6.1");
+        assert_eq!(s[2].kind, ServiceKind::Cassandra);
+        assert_eq!(s[2].image, "scylladb/scylla:6.1");
+    }
+
+    #[test]
+    fn mariadb_reuses_mysql_kind_with_mariadb_image() {
+        // MariaDB is wire-compatible with MySQL, so it maps onto the MySQL
+        // provider/client but must pull the `mariadb` image.
+        let s = parse_services("version: 1\nservices: [mariadb, mariadb:11.4]\n");
+        assert_eq!(s[0].kind, ServiceKind::Mysql);
+        assert_eq!(s[0].image, "mariadb:11");
+        assert_eq!(s[1].kind, ServiceKind::Mysql);
+        assert_eq!(s[1].image, "mariadb:11.4");
     }
 
     #[test]

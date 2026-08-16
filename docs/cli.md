@@ -13,6 +13,7 @@ noworries [OPTIONS] [COMMAND]
 | `noworries init --with a,b`      | Also append ready-to-edit example blocks: `externals-mock`, `scenario`, `flink`, `auth`, `graphql`, `grpc`, `metrics`, `sse`, `websocket`, `schema`. |
 | `noworries validate`             | Parse + validate the spec **without** starting containers. Prints a precise error (field + line:column) on failure. |
 | `noworries spec` (`schema`)      | Print the full `noworries.yml` field reference bundled with this binary (authoritative for the installed version). |
+| `noworries spec --format json`   | Print a **JSON Schema** generated from the actual types (editor completion / programmatic query, e.g. `.definitions.MockStub.properties`). |
 | `noworries changed`              | List files changed vs `HEAD` (modified + staged + untracked). Used by `/noworries` to scope checks. |
 | `noworries changed --all`        | List **all** tracked files (the `force` / regression scope). `--force` is an alias for `--all`. |
 | `noworries install-command`      | Install the `/noworries` Claude Code slash command into `~/.claude/commands`. |
