@@ -893,8 +893,11 @@ pub struct NoworriesSpec {
 
 impl NoworriesSpec {
     pub fn parse(source: &str) -> Result<Self> {
+        // Surface serde's exact message (e.g. `orders[0]: unknown field
+        // "method", expected one of ... at line 7 column 9`) so a human or an AI
+        // can see which field/line is wrong instead of an anonymous failure.
         let raw: RawSpec = serde_yaml::from_str(source)
-            .with_context(|| format!("could not parse {SPEC_FILENAME}"))?;
+            .map_err(|e| anyhow::anyhow!("could not parse {SPEC_FILENAME}: {e}"))?;
         if raw.version != 1 {
             bail!("{SPEC_FILENAME}: unsupported version (expected 1, got {})", raw.version);
         }
@@ -1087,6 +1090,15 @@ checks:
         assert_eq!(f.jobs[0].args, vec!["--source", "events-in"]);
         assert_eq!(f.jobs[0].parallelism, Some(2));
         assert_eq!(f.jobs[1].jar, "target/index-0.1.jar");
+    }
+
+    #[test]
+    fn parse_error_names_the_bad_field() {
+        // An unknown field must produce a message that identifies it (so an AI
+        // can self-correct from a minimal probe instead of guessing).
+        let yaml = "version: 1\nservices: [postgres]\nchecks:\n  - name: x\n    request: { method: GET, path: /, bogus: 1 }\n";
+        let err = NoworriesSpec::parse(yaml).err().unwrap().to_string();
+        assert!(err.contains("unknown field") && err.contains("bogus"), "got: {err}");
     }
 
     #[test]

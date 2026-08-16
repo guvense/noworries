@@ -24,7 +24,27 @@ Exit code: `0` READY, `1` NOT READY/error, `2` not confirmed.
 - `/noworries` — scope to what changed since HEAD (`noworries changed`).
 - `/noworries force` — regression: everything (`noworries changed --all`), full suite.
 - `/noworries init` — scaffold a starter `noworries.yml` (`noworries init`), then
-  show it to the user and tailor its `checks` to the code.
+  show it to the user and tailor its `checks` to the code. Add ready-to-edit
+  example blocks with `noworries init --with externals-mock,scenario,graphql,…`.
+
+## Getting the schema right (authoritative sources)
+
+The reference below covers the common fields. For anything whose **exact YAML
+shape isn't shown here**:
+
+- `noworries spec` (alias `noworries schema`) prints the **full field reference
+  bundled with the installed binary** — use it as the source of truth for this
+  version.
+- `noworries validate` (or `noworries --file <f> validate`) parses the spec
+  **without starting containers** and prints a precise error, e.g.
+  `checks[0].request: unknown field "verb", expected one of "method", "path",
+  "headers", "body" at line 7 column 9`. Write a minimal block, validate, read the
+  error, fix — iterate fast.
+
+> **If a field's shape is still unclear, do NOT infer it from a local source
+> checkout.** Either ask the user, or make a minimal probe and read the
+> `noworries validate` error. Do not rely on files outside the tool's install
+> prefix (they may not exist on another machine / CI).
 
 ## The loop
 
@@ -64,6 +84,12 @@ Boot** (`pom.xml`/`gradle`/`mvnw`), **Go** (`go.mod`), **FastAPI** (`main.py`/
 priority is Spring → Go → FastAPI → Node, so a JVM app that also ships a
 `package.json` still detects as Spring. Spring probes `/actuator/health`; the
 others wait for the TCP port (`health: none`) unless you set `app.health`.
+
+> **Detection is from the project root only** (the `--dir`, default cwd). In a
+> multi-module repo or one with sibling apps, run from (or point `--dir` at) the
+> module you're verifying, and use `app.start`/`app.framework` explicitly if the
+> markers of two frameworks sit in the same directory. Test a specific scope with
+> `noworries --file <path>` when a repo holds more than one `noworries.yml`.
 
 ## Auto-injected environment
 
@@ -162,6 +188,8 @@ externals:
   - name: payments
     url: "${PAYMENTS_URL}"              # ask the user for the sandbox URL
     url_env: PAYMENTS_BASE_URL          # the property/env your app actually reads
+    env:                                # optional: extra literal env vars (values interpolate ${VAR})
+      PAYMENTS_TIMEOUT_MS: "3000"
     auth:
       basic: { username: "${PAY_USER}", password: "${PAY_PASS}", header_env: PAYMENTS_AUTHORIZATION }
       # or bearer: { token: "${PAY_TOKEN}", header_env: PAYMENTS_AUTHORIZATION }
@@ -175,6 +203,53 @@ ready `Basic base64` header), `…_TOKEN`/`…_AUTHORIZATION` (bearer),
 non-alphanumerics → `_`. If the app has no matching env override yet, prefer
 adding one in code that reads the conventional var, or set the app's real var via
 `url_env`/`*_env`.
+
+`externals[].env` is a map of extra literal env vars for that dependency; values
+interpolate `${VAR}` like everywhere else.
+
+### Mocking an external (`externals[].mock`)
+
+Instead of a real sandbox, stand up an **in-process mock**: noworries serves the
+stubs on a local port, injects **that** URL as the external's URL (overrides
+`url`), and **records every request** the app makes so `external_calls` can assert
+on them.
+
+```yaml
+externals:
+  - name: payments
+    url_env: PAYMENTS_URL               # the mock's URL is injected here (+ NOWORRIES_EXTERNAL_PAYMENTS_URL)
+    auth: { basic: { username: "u", password: "p", header_env: PAYMENTS_AUTHORIZATION } }
+    mock:
+      stubs:                            # ARRAY; matched top-to-bottom, FIRST match wins
+        - when: { method: GET, path: /charge/1 }         # `path` is an EXACT match; query string ignored
+          respond: { status: 200, body: { id: "1", status: "PAID" }, headers: { X-Trace: "t" } }
+        - when: { path: /webhook }      # `method` OMITTED → matches ANY method
+          respond: { status: 202 }      # body/headers optional; default status 200
+      # A request matching NO stub is still RECORDED and answered `200` with an empty body.
+```
+
+`mock.stubs[]` — each: `when { method? , path }` and `respond { status?=200, body?, headers? }`.
+`body` is JSON (a plain string is sent as-is). `path` matches exactly (no prefix/regex);
+the query string is ignored. Omitting `when.method` matches any method.
+
+Then assert the app actually called the mock:
+
+```yaml
+checks:
+  - name: "creating an order charges the customer"
+    request: { method: POST, path: /orders, body: { sku: "A", amount: 100 } }
+    expect:  { status: 201 }
+    external_calls:
+      - external: payments              # matches externals[].name
+        method: POST                    # OPTIONAL; omit to match ANY method
+        path: /charge                   # EXACT path match (query string ignored)
+        body_contains: { amount: 100 }  # deep-SUBSET match on the recorded JSON body
+        times: 1                        # exact count; OMIT for "at least one"
+```
+
+`external_calls` is retry-aware (for calls the app makes asynchronously). Matching:
+`path` exact, `method` optional (any if omitted), `body_contains` deep-subset,
+`times` exact-count or (omitted) at-least-one.
 
 ## Edge-case scenarios (don't just test the happy path)
 

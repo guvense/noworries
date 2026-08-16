@@ -10,6 +10,9 @@ noworries [OPTIONS] [COMMAND]
 | -------------------------------- | ----------- |
 | `noworries`                      | Run the harness: detect services, (confirm), bring infra up, start the app, run checks, tear down. |
 | `noworries init`                 | Scaffold a starter `noworries.yml`. |
+| `noworries init --with a,b`      | Also append ready-to-edit example blocks: `externals-mock`, `scenario`, `flink`, `auth`, `graphql`, `grpc`, `metrics`, `sse`, `websocket`, `schema`. |
+| `noworries validate`             | Parse + validate the spec **without** starting containers. Prints a precise error (field + line:column) on failure. |
+| `noworries spec` (`schema`)      | Print the full `noworries.yml` field reference bundled with this binary (authoritative for the installed version). |
 | `noworries changed`              | List files changed vs `HEAD` (modified + staged + untracked). Used by `/noworries` to scope checks. |
 | `noworries changed --all`        | List **all** tracked files (the `force` / regression scope). `--force` is an alias for `--all`. |
 | `noworries install-command`      | Install the `/noworries` Claude Code slash command into `~/.claude/commands`. |
@@ -28,6 +31,7 @@ noworries [OPTIONS] [COMMAND]
 | `--html <path>`   | off       | Write a self-contained HTML results report. |
 | `--update-snapshots` | off    | Write/refresh `snapshot` golden files instead of failing on a diff. |
 | `--dir <path>`    | `.`       | Project directory. |
+| `--file <path>`   | `<dir>/noworries.yml` | Use a specific spec file (one repo can hold several scopes). |
 
 ## Exit codes
 

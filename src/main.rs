@@ -67,6 +67,11 @@ struct Cli {
     #[arg(long, default_value = ".", global = true)]
     dir: String,
 
+    /// Spec file to use instead of `<dir>/noworries.yml` (lets one repo hold
+    /// several scopes, e.g. `noworries --file orders.yml`).
+    #[arg(long, global = true)]
+    file: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -75,7 +80,18 @@ struct Cli {
 #[allow(clippy::enum_variant_names)]
 enum Command {
     /// Scaffold a starter noworries.yml.
-    Init,
+    Init {
+        /// Include ready-to-edit example blocks for specific features
+        /// (comma-separated): externals-mock, scenario, flink, auth, graphql,
+        /// grpc, metrics, sse, websocket, schema.
+        #[arg(long, value_delimiter = ',')]
+        with: Vec<String>,
+    },
+    /// Parse + validate the spec without starting any containers.
+    Validate,
+    /// Print the full `noworries.yml` field reference (bundled with this binary).
+    #[command(alias = "schema")]
+    Spec,
     /// List the files the AI changed (for scoping checks). `--all` = everything.
     Changed {
         /// Cover all tracked files (the "force"/regression scope).
@@ -279,7 +295,7 @@ checks:
   #   logs:    { contains: ["OrderCreated"], absent: ["ERROR"] }
 "#;
 
-fn cmd_init(dir: &str) -> Result<i32> {
+fn cmd_init(dir: &str, with: &[String]) -> Result<i32> {
     let path = Path::new(dir).join(SPEC_FILENAME);
     if path.exists() {
         report::warn(&format!(
@@ -288,10 +304,215 @@ fn cmd_init(dir: &str) -> Result<i32> {
         ));
         return Ok(0);
     }
-    std::fs::write(&path, STARTER_SPEC)?;
+    let mut content = String::from(STARTER_SPEC);
+    for feature in with {
+        match template_for(feature) {
+            Some(t) => content.push_str(t),
+            None => report::warn(&format!(
+                "unknown --with \"{feature}\" (known: {})",
+                WITH_FEATURES.join(", ")
+            )),
+        }
+    }
+    std::fs::write(&path, content)?;
     report::ok(&format!("wrote a starter {SPEC_FILENAME} to {}", path.display()));
+    if !with.is_empty() {
+        report::info(&format!("included example blocks for: {}", with.join(", ")));
+    }
     report::info("Edit it to declare your services and checks, then run `noworries`.");
     Ok(0)
+}
+
+const WITH_FEATURES: &[&str] = &[
+    "externals-mock",
+    "scenario",
+    "flink",
+    "auth",
+    "graphql",
+    "grpc",
+    "metrics",
+    "sse",
+    "websocket",
+    "schema",
+];
+
+/// A commented, ready-to-edit example block appended by `init --with <feature>`.
+fn template_for(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "externals-mock" => {
+            r#"
+# --- externals-mock: stand up an in-process fake of an upstream and assert the
+# --- app called it. The mock's URL is injected as the external's URL.
+# externals:
+#   - name: payments
+#     url_env: PAYMENTS_URL           # the mock URL is injected here (+ NOWORRIES_EXTERNAL_PAYMENTS_URL)
+#     mock:
+#       stubs:                        # matched top-to-bottom, first match wins
+#         - when: { method: GET, path: /charge/1 }         # exact path; query string ignored
+#           respond: { status: 200, body: { id: "1", status: "PAID" }, headers: { X-Trace: "t" } }
+#         - when: { path: /webhook }  # method omitted → matches any method
+#           respond: { status: 202 }
+#       # any unmatched request is still recorded and answered 200 with an empty body
+# checks:
+#   - name: "creating an order charges the customer"
+#     request: { method: POST, path: /orders, body: { sku: "A", amount: 100 } }
+#     expect:  { status: 201 }
+#     external_calls:
+#       - external: payments
+#         method: POST                # optional; omit to match any method
+#         path: /charge               # exact path match
+#         body_contains: { amount: 100 }   # deep-subset match on the recorded JSON body
+#         times: 1                    # exact count; omit for "at least one"
+"#
+        }
+        "scenario" => {
+            r#"
+# --- scenario: edge-case load/timing trigger (burst | concurrent | duplicates | out_of_order)
+# checks:
+#   - name: "burst of 500 orders: none dropped"
+#     scenario:
+#       kind: burst
+#       count: 500
+#       concurrency: 8
+#       expect_throughput_per_sec: 1000   # optional gate
+#       kafka: { topic: orders-in, key: "ord-${seq}", message: { id: "${uuid}", amount: "${seq}" } }
+#     db: { query: "SELECT count(*) n FROM orders", expect_row: { n: 500 } }
+"#
+        }
+        "flink" => {
+            r#"
+# --- flink: ephemeral session cluster + submit jobs, verify the pipeline end to end
+# flink:
+#   image: flink:1.19
+#   slots: 2
+#   jobs:
+#     - build: "mvn -q -DskipTests package"    # optional
+#       jar: target/pipeline-0.1.jar
+#       entry_class: com.acme.Pipeline
+# # the job reaches services by in-network name: kafka:9092, postgres:5432, elastic:9200
+"#
+        }
+        "auth" => {
+            r#"
+# --- auth: applied to every check request (login | bearer | basic | api_key)
+# auth:
+#   login: { request: { method: POST, path: /auth/login, body: { username: "${U}", password: "${P}" } }, token_from: "$.accessToken" }
+#   # bearer: { token: "${API_TOKEN}" }
+#   # basic:  { username: "${U}", password: "${P}" }
+#   # api_key: { header: "X-API-Key", value: "${API_KEY}" }
+"#
+        }
+        "graphql" => {
+            r#"
+# --- graphql: POST a query/mutation, assert on data/errors
+# checks:
+#   - name: "order query"
+#     graphql:
+#       path: /graphql
+#       query: "query($id: ID!) { order(id: $id) { status } }"
+#       variables: { id: "ABC" }
+#       expect_data: { order: { status: "PENDING" } }
+#       expect_no_errors: true
+"#
+        }
+        "grpc" => {
+            r#"
+# --- grpc: calls a method via grpcurl (must be on PATH; needs reflection or protos)
+# checks:
+#   - name: "GetOrder returns the order"
+#     grpc:
+#       target: "127.0.0.1:${NOWORRIES_GRPC_PORT}"
+#       method: "orders.OrderService/GetOrder"
+#       data: { id: "ABC" }
+#       expect_contains: { status: "PENDING" }
+"#
+        }
+        "metrics" => {
+            r#"
+# --- metrics: scrape a Prometheus endpoint and compare a series value
+# checks:
+#   - name: "the request was counted"
+#     request: { method: POST, path: /orders, body: { sku: "A" } }
+#     expect:  { status: 201 }
+#     metrics:
+#       path: /actuator/prometheus
+#       metric: http_server_requests_seconds_count
+#       labels: { status: "201" }
+#       expect: ">= 1"
+"#
+        }
+        "sse" => {
+            r#"
+# --- sse: read an event stream until a matching event arrives
+# checks:
+#   - name: "an OrderCreated event is streamed"
+#     sse:
+#       path: /events
+#       contains: { type: "OrderCreated" }
+#       timeout_ms: 5000
+"#
+        }
+        "websocket" => {
+            r#"
+# --- websocket: connect, optionally send, await a matching message
+# checks:
+#   - name: "subscription pushes the update"
+#     websocket:
+#       url: "ws://127.0.0.1:${SERVER_PORT}/ws"
+#       send: { subscribe: "orders" }
+#       expect_message: { type: "OrderCreated" }
+#       timeout_ms: 5000
+"#
+        }
+        "schema" => {
+            r#"
+# --- schema: assert a table's columns/types (Postgres or MySQL)
+# checks:
+#   - name: "orders table migrated correctly"
+#     schema:
+#       table: orders
+#       has_columns: [id, sku, status]
+#       columns: { qty: int, created_at: timestamp }
+"#
+        }
+        _ => return None,
+    })
+}
+
+/// Bundled spec reference (travels with the binary, so it can't drift from it).
+const SPEC_REFERENCE_CONFIG: &str = include_str!("../docs/configuration.md");
+const SPEC_REFERENCE_CHECKS: &str = include_str!("../docs/checks.md");
+
+fn cmd_spec() -> Result<i32> {
+    println!("{SPEC_REFERENCE_CONFIG}");
+    println!("\n---\n");
+    println!("{SPEC_REFERENCE_CHECKS}");
+    Ok(0)
+}
+
+fn cmd_validate(cli: &Cli) -> Result<i32> {
+    let path = spec_path(cli);
+    match NoworriesSpec::load(&path) {
+        Ok(spec) => {
+            report::ok(&format!(
+                "{} is valid — {} service(s), {} check(s){}{}",
+                path.display(),
+                spec.services.len(),
+                spec.checks.len(),
+                if spec.flink.is_some() { ", flink pipeline" } else { "" },
+                if spec.externals.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} external(s)", spec.externals.len())
+                }
+            ));
+            Ok(0)
+        }
+        Err(e) => {
+            report::error_line(&e.to_string());
+            Ok(1)
+        }
+    }
 }
 
 fn cmd_install_command(project: bool, dir: &str) -> Result<i32> {
@@ -329,9 +550,17 @@ fn cmd_changed(dir: &str, all: bool, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Resolve the spec file: `--file <path>` wins, else `<dir>/noworries.yml`.
+fn spec_path(cli: &Cli) -> std::path::PathBuf {
+    match &cli.file {
+        Some(f) => Path::new(f).to_path_buf(),
+        None => Path::new(&cli.dir).join(SPEC_FILENAME),
+    }
+}
+
 fn cmd_run(cli: &Cli) -> Result<i32> {
     let dir = cli.dir.clone();
-    let spec_path = Path::new(&dir).join(SPEC_FILENAME);
+    let spec_path = spec_path(cli);
     let spec = NoworriesSpec::load(&spec_path)?;
 
     report::info("");
@@ -671,7 +900,9 @@ fn main() {
 
     let cli = Cli::parse();
     let result = match &cli.command {
-        Some(Command::Init) => cmd_init(&cli.dir),
+        Some(Command::Init { with }) => cmd_init(&cli.dir, with),
+        Some(Command::Validate) => cmd_validate(&cli),
+        Some(Command::Spec) => cmd_spec(),
         Some(Command::Changed { all }) => cmd_changed(&cli.dir, *all, cli.json),
         Some(Command::InstallCommand { project }) => cmd_install_command(*project, &cli.dir),
         None => cmd_run(&cli),
