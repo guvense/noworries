@@ -4,13 +4,24 @@
 
 **Let an AI verify the changes it just made — before you find out the hard way.**
 
+[![CI](https://github.com/guvense/noworries/actions/workflows/ci.yml/badge.svg)](https://github.com/guvense/noworries/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-8957e5)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-dea584?logo=rust&logoColor=white)
+![No AI required to run](https://img.shields.io/badge/AI-optional-2ea44f)
+
 `noworries` stands up the real infrastructure a feature needs in throwaway
 Docker containers, starts your app against them, exercises the new behaviour end
 to end, and reports **READY** or **NOT READY**. Paired with the `/noworries`
 command in Claude Code, the AI reads the result and fixes its own code until it's
-green.
+green — but the binary is standalone: hand-write the `noworries.yml` and run it
+in CI or locally, no AI in the loop.
 
 Runs natively on **macOS, Linux, and Windows**.
+
+<br>
+
+<img src="docs/demo.svg" alt="A noworries run: real Postgres, Redis and Kafka spun up, the app started, checks run — result READY" width="740">
 
 </div>
 
@@ -52,6 +63,15 @@ check the change it just made. Where noworries differs:
 Use both: Testcontainers for the committed regression suite, noworries as the
 agent's fast "did my change actually work?" gate (you can commit `noworries.yml`
 and run it in CI too).
+
+### vs. YAML API testers (Venom, Hurl, Step CI)
+
+Those are excellent *test runners* — you point them at an environment that
+already exists and they fire HTTP/DB/etc. steps. noworries owns the whole
+environment: it **spins up the ephemeral infra, starts your real app wired to
+it, runs the checks, and tears it all down** in one command. So it's
+*environment + app + checks*, not checks against an environment you have to
+stand up (and clean up) yourself.
 
 ## How it works
 

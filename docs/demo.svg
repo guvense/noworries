@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="470" viewBox="0 0 820 470" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace" role="img" aria-label="noworries terminal demo: a run that ends in READY">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b1f27"/>
+      <stop offset="1" stop-color="#12151b"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- window -->
+  <rect x="14" y="12" width="792" height="446" rx="12" fill="url(#bg)" filter="url(#shadow)" stroke="#2b303b" stroke-width="1"/>
+  <!-- title bar -->
+  <rect x="14" y="12" width="792" height="38" rx="12" fill="#232833"/>
+  <rect x="14" y="34" width="792" height="16" fill="#232833"/>
+  <circle cx="38" cy="31" r="6" fill="#ff5f56"/>
+  <circle cx="58" cy="31" r="6" fill="#ffbd2e"/>
+  <circle cx="78" cy="31" r="6" fill="#27c93f"/>
+  <text x="410" y="35" text-anchor="middle" fill="#8b93a1" font-size="13">noworries — zsh</text>
+
+  <!-- body -->
+  <g font-size="15.5" xml:space="preserve">
+    <text x="34" y="82"><tspan fill="#5eead4">❯</tspan> <tspan fill="#e6e9ef">noworries changed</tspan></text>
+
+    <text x="34" y="112" fill="#7d8697">Detected services:</text>
+    <text x="34" y="136"><tspan fill="#27c93f">✓</tspan> <tspan fill="#c7ccd6">postgres:16-alpine   redis:7-alpine   kafka:3.7.0</tspan></text>
+    <text x="34" y="160"><tspan fill="#27c93f">✓</tspan> <tspan fill="#c7ccd6">containers healthy · app ready on </tspan><tspan fill="#7aa2f7">http://127.0.0.1:53219</tspan></text>
+
+    <text x="34" y="196" fill="#565f70">=== noworries results ===</text>
+
+    <text x="34" y="224"><tspan fill="#0b0d10" font-weight="bold">▍</tspan><tspan fill="#27c93f" font-weight="bold">PASS</tspan>  <tspan fill="#e6e9ef">create order: 201, persists, charges payments, fast</tspan></text>
+    <text x="60" y="250"><tspan fill="#27c93f">✓</tspan> <tspan fill="#8b93a1">[http]</tspan>            <tspan fill="#c7ccd6">POST /orders → 201</tspan>  <tspan fill="#7d8697">(84ms ≤ 500ms)</tspan></text>
+    <text x="60" y="274"><tspan fill="#27c93f">✓</tspan> <tspan fill="#8b93a1">[db]</tspan>              <tspan fill="#c7ccd6">row matches { status: "PENDING" }</tspan></text>
+    <text x="60" y="298"><tspan fill="#27c93f">✓</tspan> <tspan fill="#8b93a1">[redis]</tspan>           <tspan fill="#c7ccd6">cache:order:ABC present</tspan></text>
+    <text x="60" y="322"><tspan fill="#27c93f">✓</tspan> <tspan fill="#8b93a1">[kafka]</tspan>           <tspan fill="#c7ccd6">OrderCreated on "orders"</tspan></text>
+    <text x="60" y="346"><tspan fill="#27c93f">✓</tspan> <tspan fill="#8b93a1">[external_calls]</tspan>  <tspan fill="#c7ccd6">payments /charge: 1 matching call</tspan></text>
+
+    <text x="34" y="384" fill="#a7afbe">Summary: <tspan fill="#e6e9ef">1 passed, 0 failed</tspan> (1 total) · torn down in 6.2s</text>
+  </g>
+
+  <!-- READY pill -->
+  <g transform="translate(34,404)">
+    <rect x="0" y="0" width="150" height="34" rx="17" fill="#0f2e1c" stroke="#27c93f" stroke-width="1.5"/>
+    <circle cx="22" cy="17" r="6" fill="#27c93f"/>
+    <text x="40" y="23" fill="#4ade80" font-size="15.5" font-weight="bold">READY</text>
+  </g>
+  <text x="200" y="426" fill="#565f70" font-size="13">real Postgres · Redis · Kafka — ephemeral, zero test code</text>
+</svg>
