@@ -28,6 +28,31 @@ out later, by hand, or in production.
 **READY / NOT READY** you (and the AI) can act on — with the *actual* services
 running, not mocks-of-everything.
 
+## "Why not just have the AI write Testcontainers tests?"
+
+You can — and for a **permanent regression suite your team owns**, you probably
+should. They're different layers: Testcontainers is a library for *writing
+integration tests*; noworries is a *verification loop* an AI agent drives to
+check the change it just made. Where noworries differs:
+
+- **No test code.** A `noworries.yml` (services + checks), not AI-written
+  container/lifecycle/client/teardown code that lives in your repo and can rot —
+  or be *green but wrong*, since the AI wrote both the code and the test.
+- **The client behaviour is solved once, correctly.** Retries for eventual
+  consistency, Kafka topic auto-creation, subset matching — handled by a
+  tested tool, not re-derived (and re-broken) in every hand-written test.
+- **Black-box, whole-app, language-agnostic.** It starts your *real* app
+  (`mvnw`/`go run`/`uvicorn`/`npm`) and pokes it from the outside — one tool
+  whether it's Spring, Go, FastAPI, or Node — instead of a per-language in-process
+  slice test.
+- **Built for the agent loop.** `noworries changed` scopes to what was just
+  touched; a structured `results.json` (expected-vs-actual per assertion) lets the
+  AI parse the failure and self-correct before you review.
+
+Use both: Testcontainers for the committed regression suite, noworries as the
+agent's fast "did my change actually work?" gate (you can commit `noworries.yml`
+and run it in CI too).
+
 ## How it works
 
 ```
