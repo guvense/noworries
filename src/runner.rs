@@ -1613,6 +1613,13 @@ fn yaml_to_bson_doc(v: &serde_yaml::Value) -> anyhow::Result<mongodb::bson::Docu
     mongodb::bson::to_document(&json).map_err(|e| anyhow::anyhow!("expected a document: {e}"))
 }
 
+/// The document to insert from a mongo seed `insert` op. Accepts the documented
+/// `{ document: {...} }` wrapper (returns the inner doc) and, leniently, a bare
+/// document (returns it as-is).
+fn mongo_insert_document(insert: &serde_yaml::Value) -> &serde_yaml::Value {
+    insert.get("document").unwrap_or(insert)
+}
+
 fn run_mongo_seed(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) {
     use mongodb::bson::{Bson, Document};
     let Some(m) = &check.mongodb else { return };
@@ -1634,8 +1641,11 @@ fn run_mongo_seed(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<Assertio
 
     for op in &m.seed {
         let result: anyhow::Result<String> = (|| {
-            if let Some(doc) = &op.insert {
-                coll.insert_one(yaml_to_bson_doc(doc)?, None)?;
+            if let Some(ins) = &op.insert {
+                // The documented form is `insert: { document: {...} }` — insert the
+                // inner document, not the wrapper (otherwise the fields end up
+                // nested under a literal `document` key and no query matches).
+                coll.insert_one(yaml_to_bson_doc(mongo_insert_document(ins))?, None)?;
                 Ok(format!("inserted into {}.{}", m.database, m.collection))
             } else if let Some(up) = &op.update {
                 let mut update = Document::new();
@@ -1869,6 +1879,22 @@ mod tests {
         let exp = json!({"status": "PENDING"});
         let act = json!({"other": 1});
         assert!(!matches_subset(&exp, &act));
+    }
+
+    #[test]
+    fn mongo_insert_extracts_inner_document() {
+        // `insert: { document: {...} }` must store the inner doc at top level,
+        // not nested under a literal `document` key (the mongo_it regression).
+        let wrapped: serde_yaml::Value =
+            serde_yaml::from_str(r#"{ document: { sku: "IT1", status: "PENDING" } }"#).unwrap();
+        let doc = yaml_to_bson_doc(mongo_insert_document(&wrapped)).unwrap();
+        assert_eq!(doc.get_str("sku").unwrap(), "IT1");
+        assert!(doc.get("document").is_none(), "must not nest under `document`");
+
+        // A bare document (no wrapper) is accepted as-is.
+        let bare: serde_yaml::Value = serde_yaml::from_str(r#"{ sku: "IT2" }"#).unwrap();
+        let doc2 = yaml_to_bson_doc(mongo_insert_document(&bare)).unwrap();
+        assert_eq!(doc2.get_str("sku").unwrap(), "IT2");
     }
 
     #[test]
