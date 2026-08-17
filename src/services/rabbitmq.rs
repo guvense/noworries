@@ -4,7 +4,10 @@
 //! alongside AMQP (5672) — a later live-check phase can assert queue/exchange
 //! state over that REST API with the existing `ureq` client, no AMQP crate. For
 //! now the provider boots the broker, wires `amqp://` env for the app, and
-//! confirms readiness with `rabbitmq-diagnostics ping` (present in every image).
+//! confirms readiness with `rabbitmq-diagnostics check_port_connectivity`, which
+//! passes only once the listener ports (incl. AMQP 5672) actually accept
+//! connections — a plain `ping` reports the node up before the AMQP listener is
+//! ready, so a client's first `connect()` could still hit ECONNRESET.
 
 use std::collections::BTreeMap;
 
@@ -57,7 +60,7 @@ impl ServiceProvider for Rabbitmq {
             healthcheck: Healthcheck {
                 test: vec![
                     "CMD-SHELL".to_string(),
-                    "rabbitmq-diagnostics -q ping || exit 1".to_string(),
+                    "rabbitmq-diagnostics -q check_port_connectivity || exit 1".to_string(),
                 ],
                 interval: "5s".to_string(),
                 timeout: "5s".to_string(),

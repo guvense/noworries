@@ -39,7 +39,7 @@ class Noworries < Formula
 
   def caveats
     <<~EOS
-      Install the /noworries slash command for Claude Code (once):
+      Install the /noworries skill for Claude Code (once):
         noworries install-command
 
       noworries needs Docker running when you use it.

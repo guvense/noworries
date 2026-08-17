@@ -16,8 +16,8 @@ noworries [OPTIONS] [COMMAND]
 | `noworries spec --format json`   | Print a **JSON Schema** generated from the actual types (editor completion / programmatic query, e.g. `.definitions.MockStub.properties`). |
 | `noworries changed`              | List files changed vs `HEAD` (modified + staged + untracked). Used by `/noworries` to scope checks. |
 | `noworries changed --all`        | List **all** tracked files (the `force` / regression scope). `--force` is an alias for `--all`. |
-| `noworries install-command`      | Install the `/noworries` Claude Code slash command into `~/.claude/commands`. |
-| `noworries install-command --project` | Install it into `./.claude/commands` (this project only). |
+| `noworries install-command`      | Install the `/noworries` Claude Code skill into `~/.claude/skills/noworries/` (`SKILL.md` + `references/`). |
+| `noworries install-command --project` | Install it into `./.claude/skills/noworries/` (this project only). |
 
 ## Options (for a run)
 

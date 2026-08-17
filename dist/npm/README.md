@@ -4,7 +4,7 @@ Prebuilt-binary distribution of [noworries](https://github.com/guvense/noworries
 
 ```bash
 npm install -g @guvenseckin4/noworries
-noworries install-command      # add the /noworries slash command to Claude Code
+noworries install-command      # add the /noworries skill to Claude Code
 ```
 
 (The command is still `noworries`; only the package name is scoped.)

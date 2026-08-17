@@ -55,11 +55,14 @@ docker compose -f .noworries/compose.test.yml -p <project-name> down -v
 
 The project name is printed at the start of each run (`noworries-...`).
 
-### `/noworries` command not found in Claude Code
+### `/noworries` skill not found in Claude Code
 
 Run `noworries install-command` (global) or `noworries install-command
---project`. Confirm the file exists at `~/.claude/commands/noworries.md`, and
-that `noworries` is on your `PATH`.
+--project`. Confirm `~/.claude/skills/noworries/SKILL.md` exists (with a `references/`
+folder next to it), and
+that `noworries` is on your `PATH`. (Older installs wrote
+`~/.claude/commands/noworries.md`; that still works, but you can delete it once
+the skill is installed.)
 
 ### `noworries: command not found`
 

@@ -20,6 +20,7 @@ pub mod cassandra;
 pub mod clickhouse;
 pub mod graphql;
 pub mod rabbitmq;
+pub mod security;
 pub mod grpc;
 pub mod metrics;
 pub mod schema;
@@ -45,6 +46,7 @@ pub fn registry() -> Vec<Box<dyn Assertion>> {
         Box::new(clickhouse::Clickhouse),
         Box::new(rabbitmq::Rabbitmq),
         Box::new(cassandra::Cassandra),
+        Box::new(security::Security),
         Box::new(sse::Sse),
         Box::new(websocket::WebSocket),
         Box::new(grpc::Grpc),

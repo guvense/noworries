@@ -20,9 +20,38 @@ use noworries::{
 const OUT_DIR: &str = ".noworries";
 const OUT_FILE: &str = "compose.test.yml";
 
-/// The /noworries slash command, embedded so any install channel (curl|sh,
-/// Homebrew, npm, cargo) can drop it into place via `noworries install-command`.
-const SLASH_COMMAND_MD: &str = include_str!("../.claude/commands/noworries.md");
+/// The /noworries skill, embedded so any install channel (curl|sh, Homebrew,
+/// npm, cargo) can drop it into place via `noworries install-command`.
+///
+/// `SKILL.md` is the entry point Claude always loads; the `references/` files
+/// are read on demand, so the whole directory has to ship together.
+const SKILL_FILES: &[(&str, &str)] = &[
+    ("SKILL.md", include_str!("../.claude/skills/noworries/SKILL.md")),
+    (
+        "references/checks.md",
+        include_str!("../.claude/skills/noworries/references/checks.md"),
+    ),
+    (
+        "references/services-and-env.md",
+        include_str!("../.claude/skills/noworries/references/services-and-env.md"),
+    ),
+    (
+        "references/scenarios.md",
+        include_str!("../.claude/skills/noworries/references/scenarios.md"),
+    ),
+    (
+        "references/externals.md",
+        include_str!("../.claude/skills/noworries/references/externals.md"),
+    ),
+    (
+        "references/flink.md",
+        include_str!("../.claude/skills/noworries/references/flink.md"),
+    ),
+    (
+        "references/troubleshooting.md",
+        include_str!("../.claude/skills/noworries/references/troubleshooting.md"),
+    ),
+];
 
 #[derive(Parser)]
 #[command(
@@ -103,9 +132,9 @@ enum Command {
         #[arg(long, alias = "force")]
         all: bool,
     },
-    /// Install the /noworries slash command for Claude Code.
+    /// Install the /noworries skill for Claude Code.
     InstallCommand {
-        /// Install into ./.claude/commands (this project) instead of ~/.claude/commands (all projects).
+        /// Install into ./.claude/skills (this project) instead of ~/.claude/skills (all projects).
         #[arg(long)]
         project: bool,
     },
@@ -525,20 +554,33 @@ fn cmd_validate(cli: &Cli) -> Result<i32> {
 }
 
 fn cmd_install_command(project: bool, dir: &str) -> Result<i32> {
+    // Install as an Agent Skill (directory + SKILL.md). Custom commands and
+    // skills were merged in Claude Code: this gives `/noworries` and, because it
+    // ships a `description`, lets Claude load it automatically when a change
+    // needs verifying. Existing `.claude/commands/noworries.md` installs keep
+    // working, but the skill form is the current one.
     let base = if project {
-        Path::new(dir).join(".claude").join("commands")
+        Path::new(dir).join(".claude").join("skills").join("noworries")
     } else {
         let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
-        Path::new(&home).join(".claude").join("commands")
+        Path::new(&home).join(".claude").join("skills").join("noworries")
     };
-    std::fs::create_dir_all(&base)?;
-    let path = base.join("noworries.md");
-    std::fs::write(&path, SLASH_COMMAND_MD)?;
-    report::ok(&format!("installed /noworries slash command to {}", path.display()));
+    for (rel, contents) in SKILL_FILES {
+        let path = base.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, contents)?;
+    }
+    report::ok(&format!(
+        "installed the /noworries skill to {} ({} files)",
+        base.display(),
+        SKILL_FILES.len()
+    ));
     if project {
-        report::info("Available in this project. Run /noworries in Claude Code.");
+        report::info("Available in this project. Run /noworries in Claude Code (or let Claude invoke it).");
     } else {
-        report::info("Available in every Claude Code project. Run /noworries.");
+        report::info("Available in every Claude Code project. Run /noworries (or let Claude invoke it).");
     }
     Ok(0)
 }

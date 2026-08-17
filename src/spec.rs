@@ -782,6 +782,8 @@ pub struct CheckSpec {
     pub rabbitmq: Option<RabbitmqAssertion>,
     #[serde(default)]
     pub cassandra: Option<CassandraAssertion>,
+    #[serde(default)]
+    pub security: Option<SecurityAssertion>,
 }
 
 fn default_true() -> bool {
@@ -926,6 +928,41 @@ pub struct RabbitmqAssertion {
     /// Assert the queue holds exactly this many messages.
     #[serde(default)]
     pub expect_messages: Option<u64>,
+}
+
+/// Defensive security assertion: probe an endpoint of the app under test with
+/// abuse cases and assert it behaves safely. This verifies *your own* app's
+/// hardening (auth enforced, hostile input handled without a server crash, no
+/// internal error leakage, security headers present) — it only ever talks to the
+/// app noworries started, and asserts safe behaviour rather than exploiting.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityAssertion {
+    /// Endpoint path to probe (relative to the app, or absolute). Defaults to
+    /// the check's `request.path`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// HTTP method. Defaults to the check's `request.method`, else `GET`.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// A JSON body used as the baseline for input probes. Defaults to the
+    /// check's `request.body`.
+    #[serde(default)]
+    #[schemars(with = "Option<serde_json::Value>")]
+    pub body: Option<serde_yaml::Value>,
+    /// Assert an unauthenticated request (auth stripped) is rejected — 401/403.
+    #[serde(default)]
+    pub require_auth: Option<bool>,
+    /// Assert hostile / malformed input is handled without a server error: no
+    /// probe returns 5xx, and a malformed body returns a 4xx.
+    #[serde(default)]
+    pub reject_bad_input: Option<bool>,
+    /// Assert responses never leak stack traces / server-internal error detail.
+    #[serde(default)]
+    pub no_error_leak: Option<bool>,
+    /// Response headers that must be present (e.g. `X-Content-Type-Options`).
+    #[serde(default)]
+    pub require_headers: Vec<String>,
 }
 
 /// Server-Sent-Events assertion: read an event stream until a matching event.

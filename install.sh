@@ -63,8 +63,8 @@ mv "$tmp/noworries" "$BIN_DIR/noworries"
 chmod +x "$BIN_DIR/noworries"
 say "==> installed $BIN_DIR/noworries"
 
-# --- install the /noworries slash command (embedded in the binary) ----------
-"$BIN_DIR/noworries" install-command || say "   (run 'noworries install-command' later to add the /noworries slash command)"
+# --- install the /noworries skill (embedded in the binary) -----------------
+"$BIN_DIR/noworries" install-command || say "   (run 'noworries install-command' later to add the /noworries skill)"
 
 # --- PATH hint --------------------------------------------------------------
 case ":$PATH:" in

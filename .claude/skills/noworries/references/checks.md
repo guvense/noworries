@@ -1,0 +1,166 @@
+# noworries — check reference
+
+_Reference for the `noworries` skill. Read this when writing or fixing `checks:` in `noworries.yml`. `noworries spec` is authoritative when it disagrees with this file._
+
+## Check reference
+
+A check may combine assertion types; it passes only if **all** pass. Order
+within a check: **seed** (mysql/mongodb `seed`) → **trigger** (`request`,
+`kafka.produce`, `scenario`) → **observe** (all queries/verifications). So "seed
+data → hit the API → check what changed" works.
+
+```yaml
+version: 1
+services: [postgres, redis, kafka, elastic, mysql, mongodb]
+app:                          # optional; auto-detected from mvnw/gradlew
+  start: "./mvnw spring-boot:run"
+  health: "/actuator/health"
+  ready_timeout: 180
+auth:                         # optional; applied to every request. ${VAR} from .noworries.env
+  login: { request: { method: POST, path: /auth/login, body: { username: "${U}", password: "${P}" } }, token_from: "$.accessToken" }
+  # or: bearer: { token: "${API_TOKEN}" } | basic: { username: "${U}", password: "${P}" } | api_key: { header: "X-API-Key", value: "${K}" }
+checks:
+  # One check can span services:
+  - name: "create order: 201, persists, caches, emits, indexes"
+    tags: [orders]
+    request: { method: POST, path: /orders, body: { sku: "ABC", qty: 2 } }
+    expect:  { status: 201, body_contains: { sku: "ABC" } }
+    db:      { query: "SELECT status FROM orders WHERE sku='ABC'", expect_row: { status: "PENDING" }, expect_row_count: 1 }
+    redis:   { key: "cache:order:ABC", expect_exists: true, expect_value_contains: { status: "PENDING" } }
+    kafka:   { expect_message: { topic: "order-events", contains: { type: "OrderCreated" }, timeout_ms: 5000 } }
+    elastic: { index: "orders", doc_id: "ABC", expect_source_contains: { status: "PENDING" }, query: { term: { sku: "ABC" } }, expect_hits: 1 }
+
+  # Kafka consumer feature (produce to trigger, verify the effect):
+  - name: "OrderCreated is consumed"
+    kafka: { produce: { topic: "orders", key: "X1", message: { type: "OrderCreated", sku: "X1" } } }
+    db:    { query: "SELECT count(*) n FROM orders WHERE sku='X1'", expect_row: { n: 1 } }
+
+  # MySQL seed -> request -> verify:
+  - name: "reprice updates the row"
+    mysql:   { seed: ["INSERT INTO orders(sku,price) VALUES('P',100)"], query: "SELECT price FROM orders WHERE sku='P'", expect_row: { price: 120 } }
+    request: { method: POST, path: /orders/P/reprice, body: { price: 120 } }
+    expect:  { status: 200 }
+
+  # MongoDB seed (insert/update/delete) -> verify (find/count):
+  - name: "order document is updated"
+    mongodb:
+      database: "app"
+      collection: "orders"
+      seed: [ { insert: { document: { sku: "M1", status: "NEW" } } } ]
+      find: { sku: "M1" }
+      expect_doc_contains: { status: "PROCESSED" }
+      expect_count: 1
+    request: { method: POST, path: /orders/M1/process }
+    expect:  { status: 200 }
+
+  # Elasticsearch template + ops:
+  - name: "reindex writes the mapping"
+    elastic:
+      index: "orders"
+      template: { name: "orders-tmpl", body: { index_patterns: ["orders*"], template: { mappings: { properties: { sku: { type: keyword } } } } } }
+      operations: [ { insert: { id: "E1", document: { sku: "E1", status: "PENDING" } } } ]
+      doc_id: "E1"
+      expect_source_contains: { status: "PENDING" }
+```
+
+Field summary: **http** `request{method,path,headers,body}` + `expect{status,body_contains,max_ms}` (max_ms = latency budget) ·
+**db/mysql** `query`, `expect_row` (deep subset on first row), `expect_row_count`; `mysql.seed` = SQL run before the request ·
+**mongodb** `database`, `collection`, `seed[{insert|update{filter,set}|delete}]`, `find`, `expect_doc_contains`, `expect_count` ·
+**redis** `key`, `expect_exists`, `expect_value`, `expect_value_contains` ·
+**kafka** `produce{topic,key,message}`, `expect_message{topic,contains,timeout_ms}` ·
+**scenario** `kind` (burst|concurrent|duplicates|out_of_order), `kafka{topic,key,message}`, `count`, `concurrency`, `keys`, `rate_per_sec`, `expect_throughput_per_sec` (edge-case load trigger; verify with observe counts) ·
+**external_calls** `[{external,method,path,body_contains,times}]` (assert the app called a mocked external — needs `externals[].mock`) ·
+**logs** `contains[]`, `absent[]` (grep `.noworries/app.log`) ·
+**elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits` ·
+**rabbitmq** `queue`, `vhost`, `expect_exists`, `min_messages`, `expect_messages` (queue depth via management API) ·
+**clickhouse** `query`, `expect_value`, `expect_row`, `expect_rows` (HTTP SQL) ·
+**cassandra** `query`, `expect_value`, `expect_row`, `expect_rows` (CQL via cqlsh; also Scylla) ·
+**security** `path`, `method`, `body`, `require_auth`, `reject_bad_input`, `no_error_leak`, `require_headers[]` (defensive abuse-case probes of the app under test) ·
+**graphql** `path`, `query`, `variables`, `expect_data`, `expect_no_errors` ·
+**metrics** `path`, `metric`, `labels`, `expect` (Prometheus; `">= 1"` etc.) ·
+**snapshot** `file`, `ignore[]` (golden diff of the check's response). **First run writes the golden and passes only with `--update-snapshots`; later runs diff against it.** `ignore` items are a top-level key (`createdAt`) or a dotted path (`$.a.b` / `a.b`), blanked before comparing ·
+**schema** `table`, `has_columns[]`, `columns{col:type}` (Postgres information_schema) ·
+**sse** `path`, `contains`, `timeout_ms` · **websocket** `url`, `send`, `expect_message`, `timeout_ms` ·
+**grpc** `target`, `method`, `data`, `expect_contains` (needs `grpcurl` on PATH) ·
+**traces** `query_url`, `service`, `operation`, `tags`, `min_count` (query Jaeger/Tempo for OTel spans).
+
+Beyond checks: top-level **`setup`** = shell commands (migrations/fixtures, e.g.
+`./mvnw flyway:migrate`) run with the app's env after infra is up, before the app
+starts. **`externals[].mock`** stands up an in-process fake (stubs + records
+calls) so you can assert outbound behaviour with `external_calls` instead of
+hitting a real sandbox. Reports: `--junit <path>` / `--html <path>` for CI.
+
+### Newer check types — examples
+
+(Run `noworries spec` for the authoritative shapes; these show the common cases.)
+
+```yaml
+checks:
+  # graphql — POST a query/mutation, assert on data (path default /graphql)
+  - name: "order query"
+    graphql: { path: /graphql, query: "query { order(id:1){status} }", expect_data: { order: { status: "PENDING" } } }
+
+  # metrics — scrape Prometheus, match a series by labels, compare its value
+  - name: "request counted"
+    request: { method: POST, path: /orders, body: { sku: "A" } }
+    expect:  { status: 201 }
+    metrics: { path: /actuator/prometheus, metric: http_server_requests_seconds_count, labels: { status: "201" }, expect: ">= 1" }
+
+  # sse — read an event stream until a matching event
+  - name: "OrderCreated streamed"
+    sse: { path: /events, contains: { type: "OrderCreated" }, timeout_ms: 5000 }
+
+  # websocket — connect, optionally send, await a matching message (ws:// or relative path)
+  - name: "subscription pushes update"
+    websocket: { url: "ws://127.0.0.1:${SERVER_PORT}/ws", send: { subscribe: "orders" }, expect_message: { type: "OrderCreated" }, timeout_ms: 5000 }
+
+  # grpc — via grpcurl on PATH (reflection or protos:[]/import_paths:[])
+  - name: "GetOrder returns the order"
+    grpc: { target: "127.0.0.1:${NOWORRIES_GRPC_PORT}", method: "orders.OrderService/GetOrder", data: { id: "ABC" }, expect_contains: { status: "PENDING" } }
+
+  # traces — app exports to Jaeger/Tempo; query its HTTP API for matching spans
+  - name: "request produced a trace"
+    request: { method: POST, path: /orders, body: { sku: "A" } }
+    expect:  { status: 201 }
+    traces: { query_url: "http://127.0.0.1:16686/api/traces", service: "orders-service", operation: "POST /orders", tags: { "http.status_code": "201" }, min_count: 1 }
+
+  # rabbitmq — inspect a queue via the management API (default rabbitmq:3.13-management)
+  - name: "publishing an order enqueues a job"
+    request:  { method: POST, path: /orders, body: { sku: "A" } }
+    expect:   { status: 202 }
+    rabbitmq: { queue: "order-jobs", min_messages: 1 }   # or expect_messages / expect_exists / vhost
+
+  # clickhouse — run SQL over the HTTP interface
+  - name: "event recorded in analytics store"
+    request:    { method: POST, path: /events, body: { user_id: 42 } }
+    expect:     { status: 202 }
+    clickhouse: { query: "SELECT count() FROM events WHERE user_id = 42", expect_value: 1 }
+
+  # cassandra — run CQL via cqlsh (also Scylla)
+  - name: "order written to the wide-column store"
+    cassandra: { query: "SELECT count(*) FROM app.orders WHERE id = 42", expect_value: 1 }
+
+  # security — defensive abuse-case probes of the app under test (localhost only)
+  - name: "orders endpoint is hardened"
+    security:
+      path: /orders
+      method: POST
+      body: { sku: "ABC", qty: 1 }
+      require_auth: true        # auth stripped -> must be 401/403
+      reject_bad_input: true    # hostile/malformed input must not 5xx
+      no_error_leak: true       # no stack traces / DB errors in responses
+      require_headers: [X-Content-Type-Options]
+```
+
+## Secrets and auth in a spec
+
+Reference `${VAR}` in `auth`/`externals`/headers/body; put the values in a
+**`.noworries.env`** (gitignored automatically). Derive auth from
+`application.properties`/code where possible; **ask the user** for the login URL
+/ credentials / API key you can't derive. If auth lives on a **separate server**
+(not the app), use an absolute URL for `auth.login.request.path` (e.g.
+`${AUTH_URL}/oauth/token`) — a relative path hits the app under test. For an
+upstream the app *calls*, use `externals` (see `externals.md`).
+
+_Run-level behaviour (shared state between checks, image pulls, teardown) is in
+`SKILL.md`._

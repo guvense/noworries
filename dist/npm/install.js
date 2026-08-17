@@ -67,7 +67,7 @@ async function main() {
     const binName = process.platform === "win32" ? "noworries.exe" : "noworries";
     const bin = path.join(__dirname, binName);
     if (process.platform !== "win32") fs.chmodSync(bin, 0o755);
-    console.log("noworries: installed. Run `noworries install-command` to add the /noworries slash command.");
+    console.log("noworries: installed. Run `noworries install-command` to add the /noworries skill.");
   } catch (e) {
     console.error(`noworries: install failed: ${e.message}`);
     console.error(`  You can build from source: cargo install --git https://github.com/${REPO}`);
