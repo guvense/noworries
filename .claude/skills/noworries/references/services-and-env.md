@@ -34,8 +34,9 @@ nothing. Use the ready-made `${CLICKHOUSE_DSN}` — it carries the credentials
 *and* `?database=noworries`. Bare `CLICKHOUSE_URL` has neither, so a plain
 client gets HTTP 403 until it adds basic auth. Wire-compatible aliases reuse a peer's provider/checks:
 `timescaledb`+`mariadb` → Postgres/MySQL, `scylladb` → Cassandra (only the image
-differs). `cockroachdb`/`opensearch` are Postgres-/Elasticsearch-compatible but
-distinct kinds. See docs/supported.md for the full table.
+differs). `cockroachdb`/`opensearch` are separate kinds (own image, own credentials) but
+their checks work anyway: `db:`/`schema:` query any Postgres-wire service and
+`elastic:` accepts an `opensearch` container. See docs/supported.md for the full table.
 
 **Container-healthy is not protocol-ready.** noworries waits for each
 container's healthcheck, but several servers accept TCP before they will finish
@@ -83,6 +84,17 @@ others wait for the TCP port (`health: none`) unless you set `app.health`.
   `daphne`/`uvicorn`. Migrations are not run for you either; use a wrapper
   (`app.start: "./start.sh"` doing `migrate` then serving) or top-level `setup:`,
   and make sure migration files are committed (`makemigrations` first).
+- **Rails:** migrations are not run for you and `bin/rails server` defaults to
+  3000. A wrapper covers both — `app: { start: "./start.sh" }` with:
+
+  ```bash
+  #!/usr/bin/env bash
+  set -e
+  bin/rails db:migrate            # idempotent, safe on every run
+  exec bin/rails server -b 0.0.0.0 -p "${PORT:-3000}"
+  ```
+
+  ActiveRecord retries its first connection, so no extra retry loop is needed.
 - **.NET:** noworries starts the app with `dotnet run --no-launch-profile` and
   sets `ASPNETCORE_URLS` — `dotnet new web` scaffolds a
   `Properties/launchSettings.json` whose `applicationUrl` (5000/7001) otherwise

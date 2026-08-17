@@ -25,3 +25,4 @@ _Reference for the `noworries` skill. Read this when a run fails for a reason th
 | ClickHouse HTTP 403 | bare `CLICKHOUSE_URL` carries no credentials — use `${CLICKHOUSE_DSN}` or send basic auth `noworries`/`noworries` |
 | MSSQL login failed | SA password is `Noworries!Pass1` (`${MSSQL_PASSWORD}`); no database is created, so connect to `master` |
 | .NET app listens on 5000, health probe times out | `Properties/launchSettings.json` overrides the port in Development — keep `dotnet run --no-launch-profile` (0.14+ default) or set `ASPNETCORE_ENVIRONMENT=Production` |
+| `db assertion but no Postgres-wire service is running` | declare `postgres`, `timescaledb` or `cockroachdb`. A `cockroachdb` service satisfies `db:`/`schema:` from 0.15 — older builds matched `postgres` only, so the workaround was an HTTP round-trip through the app |

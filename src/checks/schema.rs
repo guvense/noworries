@@ -16,11 +16,13 @@ use serde_json::Value as Json;
 
 use super::{fail, pass, retry_until, Assertion};
 use crate::runner::{mysql_conn, AssertionResult, RunnerContext};
-use crate::services::{PG_DB, PG_PASSWORD, PG_USER};
 use crate::spec::{CheckSpec, ServiceKind};
 
 enum Backend {
-    Postgres(u16),
+    /// Any Postgres-wire service (postgres, timescaledb, cockroachdb) — carries
+    /// the resolved connection string, since CockroachDB authenticates
+    /// differently (`root`, no password, `defaultdb`).
+    Postgres(String),
     Mysql(u16),
     /// SQL Server, queried via `docker compose exec <service> sqlcmd ...`.
     Mssql { service: String, project: String, file: String },
@@ -31,11 +33,8 @@ pub struct Schema;
 impl Assertion for Schema {
     fn run(&self, check: &CheckSpec, ctx: &RunnerContext, retry: Duration) -> Vec<AssertionResult> {
         let Some(s) = &check.schema else { return vec![] };
-        let backend = ctx
-            .endpoints
-            .iter()
-            .find(|e| e.kind == ServiceKind::Postgres)
-            .map(|e| Backend::Postgres(e.host_port))
+        let backend = crate::runner::pg_wire_target(&ctx.endpoints)
+            .map(|(_, conn)| Backend::Postgres(conn))
             .or_else(|| {
                 ctx.endpoints
                     .iter()
@@ -46,7 +45,7 @@ impl Assertion for Schema {
         let Some(backend) = backend else {
             return vec![fail(
                 "schema",
-                "schema assertion but no Postgres/MySQL/SQL Server service is running".into(),
+                "schema assertion but no Postgres-wire/MySQL/SQL Server service is running".into(),
                 None,
                 None,
             )];
@@ -67,7 +66,7 @@ fn mssql_backend(ctx: &RunnerContext) -> Option<Backend> {
 
 fn evaluate(s: &crate::spec::SchemaAssertion, backend: &Backend) -> Vec<AssertionResult> {
     let loaded = match backend {
-        Backend::Postgres(port) => load_columns_pg(s, *port),
+        Backend::Postgres(conn) => load_columns_pg(s, conn),
         Backend::Mysql(port) => load_columns_mysql(s, *port),
         Backend::Mssql { service, project, file } => load_columns_mssql(s, service, project, file),
     };
@@ -111,13 +110,10 @@ fn evaluate(s: &crate::spec::SchemaAssertion, backend: &Backend) -> Vec<Assertio
 
 fn load_columns_pg(
     s: &crate::spec::SchemaAssertion,
-    port: u16,
+    conn: &str,
 ) -> Result<BTreeMap<String, String>, String> {
-    let conn = format!(
-        "host=127.0.0.1 port={port} user={PG_USER} password={PG_PASSWORD} dbname={PG_DB}"
-    );
-    let mut client = postgres::Client::connect(&conn, postgres::NoTls)
-        .map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    let mut client = postgres::Client::connect(conn, postgres::NoTls)
+        .map_err(|e| format!("could not connect over the Postgres wire: {e}"))?;
     let schema = s.schema.clone().unwrap_or_else(|| "public".to_string());
     let rows = client
         .query(

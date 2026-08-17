@@ -76,6 +76,11 @@ block (an ephemeral jobmanager + taskmanager session cluster) instead of
 `services:`, when the thing under test is a Flink job. See
 [configuration.md](configuration.md).
 
+`cockroachdb` is a distinct kind (own image, `start-single-node --insecure`,
+port 26257, `root` with no password against `defaultdb`) but it speaks the
+Postgres wire, so `db:` and `schema:` query it like any Postgres — noworries
+resolves the credentials per kind.
+
 SQL Server needs a complex password, so its SA login is `sa` / `Noworries!Pass1`
 (exported as `MSSQL_PASSWORD` and `MSSQL_SA_PASSWORD`) and no database is
 created — an app lands in `master`. ClickHouse is `noworries`/`noworries` with a

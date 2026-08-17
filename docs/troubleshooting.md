@@ -109,3 +109,11 @@ the second port is yours to choose: `app.env: { GRPC_PORT: "50551" }`, then
 services are registered from dynamically built descriptors — so pass
 `protos: [orders.proto]` (paths resolve relative to the `noworries.yml`).
 
+### `db assertion but no Postgres-wire service is running`
+
+Declare `postgres`, `timescaledb` or `cockroachdb`. All three answer `db:` and
+`schema:` checks: CockroachDB is a separate kind with its own credentials
+(`root`, no password, `defaultdb`, `sslmode=disable`), which is why matching on
+the Postgres kind alone used to reject it and left an HTTP round-trip through
+the app as the only way to observe a write.
+

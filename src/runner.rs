@@ -480,15 +480,12 @@ fn row_to_json(row: &postgres::Row) -> Json {
 }
 
 /// One evaluation of a check's DB assertions against a fresh connection.
-fn evaluate_db(db: &crate::spec::DbAssertion, host_port: u16) -> Vec<AssertionResult> {
+fn evaluate_db(db: &crate::spec::DbAssertion, conn: &str) -> Vec<AssertionResult> {
     let mut out = Vec::new();
-    let conn = format!(
-        "host=127.0.0.1 port={host_port} user={PG_USER} password={PG_PASSWORD} dbname={PG_DB}"
-    );
-    let mut client = match postgres::Client::connect(&conn, postgres::NoTls) {
+    let mut client = match postgres::Client::connect(conn, postgres::NoTls) {
         Ok(c) => c,
         Err(e) => {
-            out.push(fail_db(format!("could not connect to Postgres: {e}")));
+            out.push(fail_db(format!("could not connect over the Postgres wire: {e}")));
             return out;
         }
     };
@@ -545,6 +542,39 @@ fn evaluate_db(db: &crate::spec::DbAssertion, host_port: u16) -> Vec<AssertionRe
     out
 }
 
+/// The Postgres-wire endpoint a `db:`/`schema:` assertion should query, and the
+/// connection string it needs.
+///
+/// CockroachDB speaks the Postgres wire protocol but is *not* interchangeable
+/// credential-wise: single-node insecure authenticates as `root` with no
+/// password against `defaultdb`. Matching only on `ServiceKind::Postgres` meant
+/// a cockroach run reported "db assertion but no Postgres service is running"
+/// and the only way to observe a write was an HTTP round-trip through the app.
+/// (`timescaledb` needs no special case — it *is* `ServiceKind::Postgres`.)
+pub fn pg_wire_target(endpoints: &[ServiceEndpoint]) -> Option<(u16, String)> {
+    if let Some(ep) = endpoints.iter().find(|e| e.kind == ServiceKind::Postgres) {
+        return Some((
+            ep.host_port,
+            format!(
+                "host=127.0.0.1 port={} user={PG_USER} password={PG_PASSWORD} dbname={PG_DB}",
+                ep.host_port
+            ),
+        ));
+    }
+    endpoints
+        .iter()
+        .find(|e| e.kind == ServiceKind::Cockroach)
+        .map(|ep| {
+            (
+                ep.host_port,
+                format!(
+                    "host=127.0.0.1 port={} user=root dbname=defaultdb sslmode=disable",
+                    ep.host_port
+                ),
+            )
+        })
+}
+
 fn fail_db(message: String) -> AssertionResult {
     AssertionResult { kind: "db".into(), passed: false, message, expected: None, actual: None }
 }
@@ -553,16 +583,20 @@ fn fail_db(message: String) -> AssertionResult {
 /// (e.g. a Kafka consumer writing to the DB) has time to land.
 fn run_db(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(db) = &check.db else { return };
-    let Some(ep) = ctx.endpoints.iter().find(|e| e.kind == ServiceKind::Postgres) else {
-        out.push(fail_db("db assertion but no Postgres service is running".into()));
+    let Some((_, conn)) = pg_wire_target(&ctx.endpoints) else {
+        out.push(fail_db(
+            "db assertion but no Postgres-wire service is running \
+             (add `postgres`, `timescaledb` or `cockroachdb` to services)"
+                .into(),
+        ));
         return;
     };
 
     let deadline = Instant::now() + retry;
-    let mut last = evaluate_db(db, ep.host_port);
+    let mut last = evaluate_db(db, &conn);
     while !last.iter().all(|a| a.passed) && Instant::now() < deadline {
         sleep(Duration::from_millis(400));
-        last = evaluate_db(db, ep.host_port);
+        last = evaluate_db(db, &conn);
     }
     out.extend(last);
 }
@@ -1947,6 +1981,33 @@ mod tests {
             container_port: 9200,
             aux_ports: Default::default(),
         }
+    }
+
+    #[test]
+    fn db_assertions_accept_cockroach_with_its_own_credentials() {
+        // Cockroach is Postgres-wire but authenticates as root/defaultdb, so a
+        // kind-only match left `db:` reporting "no Postgres service".
+        let (port, conn) = pg_wire_target(&[endpoint(ServiceKind::Cockroach, 26260)]).unwrap();
+        assert_eq!(port, 26260);
+        assert!(conn.contains("user=root"), "{conn}");
+        assert!(conn.contains("dbname=defaultdb"), "{conn}");
+        assert!(conn.contains("sslmode=disable"), "{conn}");
+        assert!(!conn.contains("password="), "insecure single node takes none: {conn}");
+    }
+
+    #[test]
+    fn plain_postgres_wins_and_keeps_its_credentials() {
+        let (_, conn) = pg_wire_target(&[
+            endpoint(ServiceKind::Cockroach, 26260),
+            endpoint(ServiceKind::Postgres, 5433),
+        ])
+        .unwrap();
+        assert!(conn.contains("port=5433") && conn.contains("user=noworries"), "{conn}");
+    }
+
+    #[test]
+    fn no_postgres_wire_service_at_all() {
+        assert!(pg_wire_target(&[endpoint(ServiceKind::Redis, 6379)]).is_none());
     }
 
     #[test]

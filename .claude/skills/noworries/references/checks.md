@@ -64,7 +64,7 @@ checks:
 ```
 
 Field summary: **http** `request{method,path,headers,body}` + `expect{status,body_contains,max_ms}` (max_ms = latency budget) ·
-**db/mysql** `query`, `expect_row` (deep subset on first row), `expect_row_count`; `mysql.seed` = SQL run before the request ·
+**db/mysql** `query`, `expect_row` (deep subset on first row), `expect_row_count`; `mysql.seed` = SQL run before the request. `db:` queries **any Postgres-wire service** — `postgres`, `timescaledb` or `cockroachdb` (the last as `root`/`defaultdb`) ·
 **mongodb** `database`, `collection`, `seed[{insert|update{filter,set}|delete}]`, `find`, `expect_doc_contains`, `expect_count` ·
 **redis** `key`, `expect_exists`, `expect_value`, `expect_value_contains` ·
 **kafka** `produce{topic,key,message}`, `expect_message{topic,contains,timeout_ms}` ·
