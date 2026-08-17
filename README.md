@@ -153,9 +153,11 @@ Result: NOT READY
 
 ## Installation
 
-Every method installs the `noworries` binary. The `/noworries` slash command is
-embedded in the binary — install it once with `noworries install-command`
-(globally into `~/.claude/commands`, or `--project` for a single repo).
+Every method installs the `noworries` binary. The `/noworries` **skill** is
+embedded in the binary — install it once with `noworries install-command`, which
+writes `SKILL.md` plus its `references/` files to `~/.claude/skills/noworries/`
+(globally), or `--project` for a single repo. In Claude Code you then run `/noworries`, or let Claude invoke
+it automatically when a change needs verifying (see [Using the skill](#using-the-noworries-skill)).
 
 <details open>
 <summary><b>curl | sh</b> (macOS / Linux — no toolchain required)</summary>
@@ -223,6 +225,33 @@ noworries               # confirm services, bring infra up, run checks, tear dow
 Or, inside Claude Code, just make a change and run **`/noworries`** — the AI
 writes the checks for you, runs them, and fixes the code if they fail. Use
 **`/noworries force`** for a full regression pass over everything that changed.
+
+## Using the `/noworries` skill
+
+`noworries install-command` installs `/noworries` as a Claude Code **skill**
+(`~/.claude/skills/noworries/`: a short `SKILL.md` entry point plus `references/`
+files Claude reads only when it needs them). Because it ships a `description`,
+there are two ways it runs:
+
+<div align="center">
+
+<img src="docs/skill-demo.gif" alt="A Claude Code session: the user runs /noworries; Claude writes noworries.yml, spins up infra, runs checks, hits NOT READY, fixes the code, and re-runs to READY" width="760">
+
+</div>
+
+1. **You invoke it** — type `/noworries` after making a change. Claude reads the
+   diff, writes/updates `noworries.yml`, stands up the infra, runs the checks,
+   and if anything is **NOT READY** it fixes the code and re-runs until green.
+   `/noworries force` runs the full suite; `/noworries init` just scaffolds a spec.
+2. **Claude invokes it** — when your request implies verification ("make sure
+   this endpoint actually works"), Claude can load the skill on its own. Prefer
+   to keep the Docker-heavy run manual? Add `disable-model-invocation: true` to
+   the skill's frontmatter and it only runs when you type `/noworries`.
+
+Either way the skill is just instructions: it tells Claude *how* to drive the
+`noworries` binary. The binary itself has no AI dependency — you can run
+`noworries` by hand or in CI with a spec you wrote yourself (see [With an AI — or
+by hand](#with-an-ai--or-by-hand)).
 
 ## `noworries.yml` at a glance
 

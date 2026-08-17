@@ -15,12 +15,13 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 cargo install --path .          # installs `noworries` into ~/.cargo/bin
 
-echo "==> Installing the /noworries slash command globally (~/.claude/commands)"
+echo "==> Installing the /noworries skill globally (~/.claude/skills/noworries)"
 if command -v noworries >/dev/null 2>&1; then
   noworries install-command            # embedded in the binary; installs globally
 else
-  mkdir -p "$HOME/.claude/commands"
-  cp "$here/.claude/commands/noworries.md" "$HOME/.claude/commands/noworries.md"
+  mkdir -p "$HOME/.claude/skills/noworries/references"
+  cp "$here/.claude/skills/noworries/SKILL.md" "$HOME/.claude/skills/noworries/SKILL.md"
+  cp "$here"/.claude/skills/noworries/references/*.md "$HOME/.claude/skills/noworries/references/"
 fi
 
 # Sanity: is the binary reachable?
@@ -36,7 +37,8 @@ cat <<'EOF'
 
 Done ✅
   • `noworries` is on your PATH (via ~/.cargo/bin)
-  • `/noworries` is available in every Claude Code project (~/.claude/commands)
+  • `/noworries` is available in every Claude Code project
+    (~/.claude/skills/noworries) — Claude can also invoke it on its own
 
 Requirements at run time: Docker running (Desktop on macOS), plus the app's
 toolchain (e.g. JDK + Maven for Spring Boot).
@@ -44,6 +46,7 @@ toolchain (e.g. JDK + Maven for Spring Boot).
 Try it:  open any repo in Claude Code, make a change, then run  /noworries
 (or  /noworries force  for a full regression pass).
 
-Prefer per-project instead of global? Skip this script and just copy
-.claude/commands/noworries.md into that project's .claude/commands/.
+Prefer per-project instead of global? Skip this script and run
+  noworries install-command --project
+from that project (writes ./.claude/skills/noworries/).
 EOF

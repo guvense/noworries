@@ -12,7 +12,7 @@ Assertions run in this order so that actions happen before observations:
 6. Kafka `expect_message`
 7. `external_calls` — assert the app called a mocked external (retry-aware)
 8. `logs` — assert the app log contains / omits patterns (retry-aware)
-9. Protocol, datastore & observability types — `graphql`, `metrics`, `snapshot`, `schema`, `clickhouse`, `rabbitmq`, `cassandra`, `sse`, `websocket`, `grpc`, `traces` (see below)
+9. Protocol, datastore, security & observability types — `graphql`, `metrics`, `snapshot`, `schema`, `clickhouse`, `rabbitmq`, `cassandra`, `security`, `sse`, `websocket`, `grpc`, `traces` (see below)
 
 ## HTTP
 
@@ -396,6 +396,43 @@ asynchronous publish has time to land. (The container uses
 `user/password = noworries`. A non-management image has no API — use the default
 `rabbitmq:3.13-management` or another `*-management` tag.)
 
+## Security (abuse-case checks)
+
+Probe an endpoint of the app under test with hostile input and assert it behaves
+safely. This is a **defensive** hardening check: it only ever talks to the
+ephemeral app noworries started, and every assertion is that the app *reacts
+safely* (rejects, or handles without crashing/leaking) — it does not exploit
+anything.
+
+```yaml
+- name: "orders endpoint is hardened"
+  security:
+    path: /orders                 # optional (default: the check's request.path)
+    method: POST                  # optional (default: the check's request.method / GET)
+    body: { sku: "ABC", qty: 1 }  # optional baseline the input probes mutate
+    require_auth: true            # request with auth stripped must be 401/403
+    reject_bad_input: true        # hostile/malformed input must not 5xx; malformed body → 4xx
+    no_error_leak: true           # responses must not leak stack traces / DB errors
+    require_headers: [X-Content-Type-Options, X-Frame-Options]
+```
+
+- `require_auth` — resends the request with the run's `auth` stripped; the
+  endpoint must reject it (401/403). Catches an endpoint that forgot its guard.
+- `reject_bad_input` — sends a malformed body, an oversized field, and classic
+  abuse strings (SQL-ish, script-ish, path-traversal, template-injection) placed
+  in the body. Every probe must come back **without a 5xx** (a server crash is a
+  real defect), and the malformed body must be a **4xx**. A safely-ignored probe
+  that returns 2xx is fine — the assertion is *no crash*, not *rejected*.
+- `no_error_leak` — scans the probe responses for leaked internals (stack
+  traces, `SQLSTATE`, `Traceback`, `panic:`, framework signatures, …) and fails
+  if any appear.
+- `require_headers` — asserts the listed response headers are present
+  (case-insensitive), e.g. `X-Content-Type-Options`, `Strict-Transport-Security`.
+
+Set at least one probe. The check needs a running app (it has no effect on a
+Flink-only run). Pair it with the normal `request`/`expect` in the same or a
+neighbouring check to cover both the happy path and the abuse path.
+
 ## External calls (mocks)
 
 When an external declares a [`mock`](configuration.md#mocking-an-external-mock),
@@ -477,6 +514,18 @@ golden file. Run once with `--update-snapshots` to create/refresh the golden.
     file: snapshots/order.json     # relative to the project dir
     ignore: [ "$.id", "$.createdAt" ]   # blank volatile fields before comparing
 ```
+
+- **First run:** if the golden file doesn't exist yet, the check **FAILs** with
+  "golden … missing" — run once with `--update-snapshots` to write it, then
+  normal runs diff the response against it. (There's no separate scaffold step;
+  `--update-snapshots` creates the file, and also refreshes it after an
+  intentional response change.)
+- **`ignore` semantics:** each item is a **top-level key** (`createdAt`) or a
+  **dotted path** (`$.a.b`, `a.b`, or `$.items.0.id`); the field at that path is
+  blanked (set to null) in both sides before comparing, so volatile values (ids,
+  timestamps) don't cause spurious diffs. A non-numeric segment against an array
+  applies to **every element** — `items.createdAt` blanks `createdAt` in each
+  item of the `items` list. A missing path is ignored.
 
 ### DB schema (`schema`, Postgres / MySQL / SQL Server)
 

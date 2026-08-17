@@ -15,10 +15,10 @@ On **Windows**, the `curl | sh` and Homebrew options don't apply — use npm
 source (`cargo install --git https://github.com/guvense/noworries`). WSL2 works
 too and behaves like Linux.
 
-Then install the Claude Code command (once):
+Then install the Claude Code skill (once):
 
 ```bash
-noworries install-command          # global: ~/.claude/commands
+noworries install-command          # global: ~/.claude/skills/noworries/
 # or, for a single project:
 noworries install-command --project
 ```

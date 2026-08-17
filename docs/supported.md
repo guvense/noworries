@@ -101,11 +101,46 @@ assertion passes. Full semantics in [checks.md](checks.md).
 | **APIs** | `graphql`, `grpc` (via `grpcurl`) |
 | **Observability** | `metrics` (Prometheus), `traces` (OpenTelemetry via Jaeger/Tempo), `logs` (contains / absent) |
 | **Contracts** | `snapshot` (golden-file diff), `external_calls` (assert outbound calls to a built-in mock) |
+| **Security** | `security` — abuse-case checks: `require_auth`, `reject_bad_input` (no 5xx on hostile input), `no_error_leak`, `require_headers` |
 | **Edge cases** | `scenario` — `burst`, `concurrent` (races), `duplicates` (idempotency), `out_of_order`, with concurrency / rate limits and a throughput assertion |
 
 Assertions that observe an eventually-consistent effect (DB, cache, search,
 ClickHouse, RabbitMQ, Cassandra, metrics, traces) **retry within a budget**, so
 async writes have time to land.
+
+---
+
+## Test scenarios & modes
+
+Beyond a single request→assert, noworries covers the harder-to-verify behaviours
+of real systems:
+
+- **Multi-service, one check.** A single check can assert across layers at once —
+  HTTP status + latency budget (`max_ms`), the DB row that landed, the cache key
+  that was set, the message on the downstream topic, the outbound call to a mock,
+  and the app log — so "it worked" means the whole slice worked, not just the
+  status code.
+- **Race conditions & concurrency.** `scenario: { kind: concurrent }` fires many
+  parallel producers at the same small set of keys to create *real* contention,
+  then your `observe` assertions prove the invariant held (no lost update, no
+  double-processing). `duplicates` re-sends the same logical message to check
+  **idempotency**; `out_of_order` shuffles delivery to check ordering assumptions.
+- **Load / throughput.** `scenario: { kind: burst, count, concurrency, rate_per_sec }`
+  drives volume through the pipeline; `expect_throughput_per_sec` asserts a floor,
+  so a regression that halves throughput fails the run. (Load sink is Kafka today.)
+- **Async pipelines.** For out-of-band processing (a Kafka consumer, a **Flink**
+  job), noworries retries eventual-consistency observers within a budget and lets
+  you stage the observation — `kafka.expect_message` on the downstream topic
+  (with `timeout_ms`) before the DB/search assert. See the Flink section in
+  [configuration.md](configuration.md).
+- **Security / abuse cases (defensive).** `security` probes an endpoint of *your
+  own* app with hostile input and asserts it stays safe: auth is enforced
+  (`require_auth` → 401/403 when stripped), malformed/injection-style input never
+  causes a 5xx (`reject_bad_input`), responses don't leak stack traces or DB
+  errors (`no_error_leak`), and security headers are present (`require_headers`).
+  It only ever talks to the ephemeral app under test and asserts *safe behaviour*
+  — it is a hardening regression check, not an exploit tool. See
+  [checks.md](checks.md#security-abuse-case-checks).
 
 ---
 
