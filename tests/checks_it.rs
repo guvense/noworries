@@ -141,3 +141,68 @@ checks:
     let results = run_checks(&checks, &ctx);
     assert!(results[0].passed, "ws check should pass: {:?}", results[0]);
 }
+
+/// Regression: an acting assertion (GraphQL, gRPC, a WebSocket `send`) must run
+/// BEFORE the observers in the same check.
+///
+/// It used to run last, so a spec that triggered over GraphQL and observed the
+/// effect elsewhere could never pass in one piece — the observer looked for the
+/// effect, exhausted its retry budget, and only then did the mutation fire. The
+/// workaround was splitting one check into two.
+///
+/// The observer here is `logs:`, which needs no container: the fake app appends
+/// a line to the app log when `/graphql` is hit, and the check asserts that line
+/// is present. Ordering is the only thing that decides the outcome.
+#[test]
+fn graphql_trigger_runs_before_observers_in_the_same_check() {
+    let log = std::env::temp_dir().join(format!("nw-order-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    std::fs::write(&log, "app started\n").unwrap();
+
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+    let port = server.server_addr().to_ip().unwrap().port();
+    let s = Arc::clone(&server);
+    let log_for_app = log.clone();
+    thread::spawn(move || {
+        for req in s.incoming_requests() {
+            let path = req.url().split('?').next().unwrap_or("").to_string();
+            if path == "/graphql" {
+                // The app's side effect: a line in its log.
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&log_for_app)
+                    .unwrap();
+                writeln!(f, "MUTATION_APPLIED sku=ABC").unwrap();
+            }
+            let body = r#"{"data":{"createOrder":{"sku":"ABC"}}}"#;
+            let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(200));
+        }
+    });
+
+    let yaml = r#"
+version: 1
+services: [postgres]
+checks:
+  - name: "mutation, then observe its effect"
+    graphql:
+      path: /graphql
+      query: "mutation { createOrder(sku: \"ABC\") { sku } }"
+      expect_data: { createOrder: { sku: "ABC" } }
+    logs:
+      contains: ["MUTATION_APPLIED sku=ABC"]
+"#;
+    let checks = NoworriesSpec::parse(yaml).unwrap().checks;
+    let mut ctx = RunnerContext::new(port, vec![]);
+    ctx.app_log_path = Some(log.clone());
+    let results = run_checks(&checks, &ctx);
+
+    server.unblock();
+    let _ = std::fs::remove_file(&log);
+
+    assert!(
+        results[0].passed,
+        "the mutation must fire before the log observer reads: {:?}",
+        results[0]
+    );
+}

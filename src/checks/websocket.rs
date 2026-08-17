@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value as Json;
 
-use super::{fail, pass, resolve_target, yaml_json, Assertion};
+use super::{fail, pass, resolve_target, yaml_json, Assertion, Phase};
 use crate::runner::{interpolate_json, matches_subset, AssertionResult, RunnerContext};
 use crate::spec::CheckSpec;
 
@@ -31,6 +31,15 @@ impl Assertion for WebSocket {
                 None,
             )],
             Err(e) => vec![fail("websocket", e, None, None)],
+        }
+    }
+
+    /// A socket that only listens is an observer; one that `send`s a message is
+    /// acting on the app, so it runs in the trigger slot.
+    fn phase(&self, check: &CheckSpec) -> Phase {
+        match &check.websocket {
+            Some(w) if w.send.is_some() && super::observes_elsewhere(check) => Phase::Trigger,
+            _ => Phase::Observe,
         }
     }
 }

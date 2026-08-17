@@ -74,14 +74,14 @@ Field summary: **http** `request{method,path,headers,body}` + `expect{status,bod
 **elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits` ·
 **rabbitmq** `queue`, `vhost`, `expect_exists`, `min_messages`, `expect_messages` (queue depth via management API) ·
 **clickhouse** `query`, `expect_value`, `expect_row`, `expect_rows` (HTTP SQL) ·
-**cassandra** `query`, `expect_value`, `expect_row`, `expect_rows` (CQL via cqlsh; also Scylla) ·
+**cassandra** `query`, `expect_value`, `expect_row`, `expect_rows` (CQL via cqlsh; also Scylla). **No `keyspace` field** — qualify tables in the query: `SELECT ... FROM app.orders` ·
 **security** `path`, `method`, `body`, `require_auth`, `reject_bad_input`, `no_error_leak`, `require_headers[]` (defensive abuse-case probes of the app under test) ·
 **graphql** `path`, `query`, `variables`, `expect_data`, `expect_no_errors` ·
-**metrics** `path`, `metric`, `labels`, `expect` (Prometheus; `">= 1"` etc.) ·
+**metrics** `path`, `metric`, `labels`, `expect` (Prometheus). `expect` is a comparison string: `">= 1"`, `"> 0"`, `"<= 10"`, `"< 5"`, `"== 5"` (also `"= 5"`); a bare number means `== n` ·
 **snapshot** `file`, `ignore[]` (golden diff of the check's response). **First run writes the golden and passes only with `--update-snapshots`; later runs diff against it.** `ignore` items are a top-level key (`createdAt`) or a dotted path (`$.a.b` / `a.b`), blanked before comparing ·
-**schema** `table`, `has_columns[]`, `columns{col:type}` (Postgres information_schema) ·
-**sse** `path`, `contains`, `timeout_ms` · **websocket** `url`, `send`, `expect_message`, `timeout_ms` ·
-**grpc** `target`, `method`, `data`, `expect_contains` (needs `grpcurl` on PATH) ·
+**schema** `table`, `has_columns[]`, `columns{col:type}` — types are Postgres `information_schema.data_type` spellings (`character varying`, not `varchar(64)`; `integer`, `timestamp without time zone`) ·
+**sse** `path`, `contains` (**a JSON object**, deep-subset against each event — `contains: { type: "OrderCreated" }`, not a bare string), `timeout_ms` · **websocket** `url` (relative path → `ws://<app>`), `send`, `expect_message` (JSON subset), `timeout_ms` ·
+**grpc** `target`, `method`, `data`, `expect_contains`, `protos[]`, `import_paths[]` (needs `grpcurl` on PATH; paths resolve relative to the `noworries.yml`) ·
 **traces** `query_url`, `service`, `operation`, `tags`, `min_count` (query Jaeger/Tempo for OTel spans).
 
 Beyond checks: top-level **`setup`** = shell commands (migrations/fixtures, e.g.
@@ -151,6 +151,38 @@ checks:
       no_error_leak: true       # no stack traces / DB errors in responses
       require_headers: [X-Content-Type-Options]
 ```
+
+## Naming traps
+
+- **Row counts differ by backend.** `db:`/`mysql:` use `expect_row_count`;
+  `clickhouse:`/`cassandra:` use `expect_rows`. Run `noworries validate` if
+  unsure — it names the accepted fields.
+- **`cassandra:` has no `keyspace`.** Qualify the table in the query
+  (`FROM app.orders`).
+- **`sse.contains` is an object**, not a string.
+
+## Non-HTTP protocols need a fixed port
+
+`request:` and relative paths (`sse.path`, `websocket.url`, `graphql.path`,
+`metrics.path`) resolve against the app's assigned port automatically. A
+`grpc.target` does **not** — there is no `${NOWORRIES_GRPC_PORT}` to
+interpolate, and `${...}` that resolves to nothing fails the check. Serve gRPC
+on a port you choose and hardcode it:
+
+```yaml
+app:
+  env: { GRPC_PORT: "50551" }
+checks:
+  - name: "GetOrder returns the order"
+    grpc: { target: "127.0.0.1:50551", method: "orders.OrderService/GetOrder", data: { id: "ABC" } }
+```
+
+Two more gRPC traps: server **reflection only works with statically compiled
+proto stubs** — if you register services from dynamically built descriptors,
+grpcurl reports "server does not expose service" and you must pass
+`protos: [orders.proto]` (resolved relative to the `noworries.yml`); and
+`grpcurl` must be on `PATH` (`brew install grpcurl`), otherwise the check fails
+at run time.
 
 ## Secrets and auth in a spec
 

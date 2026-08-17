@@ -363,7 +363,11 @@ to `SELECT JSON` internally so each row is parsed as JSON.
 - `query` — any CQL `SELECT`.
 - `expect_value` — the single scalar result (single-column query).
 - `expect_row` — deep subset match on the first row (`column → value`).
-- `expect_rows` — assert exactly N rows.
+- `expect_rows` — assert exactly N rows. (Note the name: `db:`/`mysql:` call the
+  same thing `expect_row_count`.)
+
+There is **no `keyspace` field** — qualify the table in the query
+(`FROM app.orders`).
 
 Works identically against ScyllaDB (declare `scylla` / `scylladb`), which ships
 the same `cqlsh`. Verification retries briefly for asynchronous writes.
@@ -473,6 +477,15 @@ line the app writes just after responding still counts.
 These extend a check beyond HTTP/DB. Each is an independent assertion type
 (pluggable via `src/checks/`), so a check can combine them with the others.
 
+Assertions that **act** on the app — a GraphQL mutation, a gRPC call, a
+WebSocket `send` — run in the check's trigger slot, before the observers
+(`db`, `mysql`, `mongodb`, `redis`, `elastic`, `kafka.expect_message`, `logs`).
+So one check can call a mutation and assert its effect in Postgres or Kafka;
+the observers keep their retry budget for the eventual-consistency window.
+(Before 0.12 they ran last, and such a check had to be split in two.) An acting
+assertion with nothing else to observe — a lone `graphql:` query — is treated
+as the observation and keeps the full retry budget.
+
 ### GraphQL (`graphql`)
 
 POST a query/mutation and assert on `data` / `errors`.
@@ -581,7 +594,7 @@ give `protos`/`import_paths`). Keeps noworries free of a heavy gRPC/proto stack.
 ```yaml
 - name: "GetOrder returns the order"
   grpc:
-    target: "127.0.0.1:${NOWORRIES_GRPC_PORT}"   # host:port
+    target: "127.0.0.1:50551"                    # host:port — see the note below
     method: "orders.OrderService/GetOrder"
     data: { id: "ABC" }                          # request JSON
     expect_contains: { status: "PENDING" }       # deep-subset on the response
@@ -589,6 +602,17 @@ give `protos`/`import_paths`). Keeps noworries free of a heavy gRPC/proto stack.
     # protos: [orders.proto]                     # if not using reflection
     # import_paths: [proto]
 ```
+
+Three things to know:
+
+- **The port is yours to fix.** Relative paths (`sse`, `websocket`, `graphql`,
+  `metrics`) resolve against the app's assigned HTTP port, but `grpc.target` is
+  used verbatim and there is no `${NOWORRIES_GRPC_PORT}` to interpolate. Set the
+  port yourself — `app: { env: { GRPC_PORT: "50551" } }` — and hardcode it.
+- **Reflection needs statically compiled stubs.** Registering services from
+  descriptors you build at run time leaves grpcurl reporting `server does not
+  expose service`; pass `protos: [orders.proto]` instead.
+- **`protos`/`import_paths` resolve relative to the `noworries.yml`.**
 
 ### OpenTelemetry traces (`traces`)
 

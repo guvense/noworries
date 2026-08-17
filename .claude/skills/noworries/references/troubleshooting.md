@@ -16,3 +16,8 @@ _Reference for the `noworries` skill. Read this when a run fails for a reason th
 | `npm install` fails `EACCES` on `~/.npm/_cacache` | stale root-owned cache — install with `npm install --cache /tmp/npm-$$` (or `sudo chown -R $(whoami) ~/.npm`) |
 | `snapshot` FAILs "golden … missing" on first run | expected — run once with `--update-snapshots` to write the golden, then it diffs |
 | `unknown field` on a check | run `noworries spec` for the exact field names (e.g. rabbitmq uses `expect_messages`, not `queue_length`) |
+| `mariadb` service never becomes healthy (`running/unhealthy`) | needs noworries ≥ 0.12 — MariaDB 11 ships no `mysqladmin`, older builds probe with it and never pass |
+| `elastic assertion but no Elasticsearch/OpenSearch service` | declare `elasticsearch` or `opensearch` in `services:` (an `opensearch` container satisfies `elastic:` checks from 0.12) |
+| `could not run grpcurl` | `brew install grpcurl` (or add it to `PATH`) — the `grpc:` check shells out to it |
+| gRPC check can't reach the app | there is no `${NOWORRIES_GRPC_PORT}`; serve gRPC on a fixed port (`app.env`) and hardcode `grpc.target` |
+| App crashed connecting to MySQL/Cassandra/RabbitMQ at startup | container-healthy ≠ protocol-ready — add a connect-retry loop in the app |

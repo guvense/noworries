@@ -59,14 +59,14 @@ uses the default image; `kind:tag` pins a tag.
 | `timescaledb` / `timescale` | `timescale/timescaledb:2.17.2-pg16` | Postgres-wire — reuses the Postgres provider/checks |
 | `cockroachdb` / `cockroach` | `cockroachdb/cockroach:v24.2.0` | Postgres-wire; single-node insecure, `root`/`defaultdb` |
 | `mysql` | `mysql:8.4` | |
-| `mariadb` | `mariadb:11` | MySQL-wire — reuses the MySQL provider/checks |
+| `mariadb` | `mariadb:11` | MySQL-wire — reuses the MySQL provider/checks (its own readiness probe: `mariadb-admin ping`, since MariaDB 11 dropped `mysqladmin`) |
 | `mssql` / `sqlserver` | `mcr.microsoft.com/mssql/server:2022-latest` | `schema` check via in-container `sqlcmd` |
 | `mongodb` / `mongo` | `mongo:7` | |
 | `redis` | `redis:7-alpine` | |
 | `kafka` | `apache/kafka:3.7.0` | advertises `localhost:9092` |
 | `rabbitmq` / `rabbit` / `amqp` | `rabbitmq:3.13-management` | management API (15672) for the `rabbitmq` check |
 | `elastic` / `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:8.13.4` | ES 7 & 8 |
-| `opensearch` | `opensearchproject/opensearch:2.17.1` | Elasticsearch-compatible |
+| `opensearch` | `opensearchproject/opensearch:2.17.1` | Elasticsearch-compatible — satisfies `elastic:` checks |
 | `clickhouse` | `clickhouse/clickhouse-server:24.8` | HTTP interface (8123) for the `clickhouse` check |
 | `cassandra` | `cassandra:5.0` | CQL via in-container `cqlsh` |
 | `scylla` / `scylladb` | `scylladb/scylla:6.1` | CQL-wire — reuses the Cassandra provider/checks |

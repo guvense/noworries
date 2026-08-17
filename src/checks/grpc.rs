@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value as Json;
 
-use super::{fail, pass, yaml_json, Assertion};
+use super::{fail, pass, yaml_json, Assertion, Phase};
 use crate::runner::{interpolate, interpolate_json, matches_subset, AssertionResult, RunnerContext};
 use crate::spec::{CheckSpec, GrpcAssertion};
 
@@ -69,6 +69,17 @@ impl Assertion for Grpc {
                     )]
                 }
             }
+        }
+    }
+
+    /// An RPC acts on the app, so it runs in the trigger slot — a check that
+    /// calls a gRPC method and then asserts `kafka.expect_message` / `db:` on
+    /// its effect works as one check.
+    fn phase(&self, check: &CheckSpec) -> Phase {
+        if check.grpc.is_some() && super::observes_elsewhere(check) {
+            Phase::Trigger
+        } else {
+            Phase::Observe
         }
     }
 }

@@ -21,11 +21,14 @@ Mongo/redis/kafka/elastic/cassandra run without auth; rabbitmq is
 differs). `cockroachdb`/`opensearch` are Postgres-/Elasticsearch-compatible but
 distinct kinds. See docs/supported.md for the full table.
 
-**RabbitMQ readiness:** the container is only reported healthy once the AMQP
-listener accepts connections, but an app's *first* `connect()` can still race a
-just-started broker — Node/Python/Go AMQP clients should wrap the initial
-connect in a short retry loop (this is normal broker practice, not a noworries
-quirk).
+**Container-healthy is not protocol-ready.** noworries waits for each
+container's healthcheck, but several servers accept TCP before they will finish
+an application-level handshake: RabbitMQ (first `connect()` can still get
+ECONNRESET), MySQL/MariaDB (the daemon is still initializing on first boot),
+Cassandra/Scylla (~30s before CQL answers). **Give the app a short connect-retry
+loop** — a few attempts a couple of seconds apart. This is ordinary client
+practice, not a noworries quirk, and it is the single most common cause of an
+app that "crashed at startup" in an otherwise green run.
 
 ## Frameworks
 
@@ -44,6 +47,28 @@ others wait for the TCP port (`health: none`) unless you set `app.health`.
 > module you're verifying, and use `app.start`/`app.framework` explicitly if the
 > markers of two frameworks sit in the same directory. Test a specific scope with
 > `noworries --file <path>` when a repo holds more than one `noworries.yml`.
+
+### Per-framework traps
+
+- **Go:** the default start is `go run .`, which recompiles on every run. For
+  repeat runs and CI, build once and point at the binary:
+  `app: { start: "./server" }`. Also, `DATABASE_URL` is injected in **URL form**
+  (`mysql://user:pass@host:port/db`) — `go-sql-driver/mysql` does *not* accept
+  it and wants a DSN (`user:pass@tcp(host:port)/db`). Build the DSN from the
+  per-part vars (`MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD`,
+  `MYSQL_DATABASE`) instead of parsing `DATABASE_URL`. `lib/pq` and `pgx` take
+  the Postgres `DATABASE_URL` as-is.
+- **Python (FastAPI/Django):** detection finds the project, but the detected
+  command runs whatever is on `PATH` — inside a virtualenv that is usually *not*
+  your `uvicorn`. Point at it explicitly:
+  `app: { start: ".venv/bin/uvicorn main:app --port ${PORT}" }`.
+- **Django:** `manage.py runserver` is WSGI-only — a Channels/ASGI app needs
+  `daphne`/`uvicorn`. Migrations are not run for you either; use a wrapper
+  (`app.start: "./start.sh"` doing `migrate` then serving) or top-level `setup:`,
+  and make sure migration files are committed (`makemigrations` first).
+- **Node:** a Kafka client that batches (kafka-go's default `BatchSize=100`,
+  `BatchTimeout=1s`) delays a single message by ~1s — raise
+  `kafka.expect_message.timeout_ms` or flush explicitly.
 
 ## Auto-injected environment
 

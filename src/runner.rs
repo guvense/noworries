@@ -1279,10 +1279,16 @@ fn es_request(
     }
 }
 
+/// Base URL for `elastic:` assertions. OpenSearch answers the same `_doc` /
+/// `_search` / `_refresh` REST API, so an `opensearch` service satisfies an
+/// `elastic:` check too — otherwise the app could write to OpenSearch through
+/// the injected `OPENSEARCH_URL` while noworries refused to read it back.
+/// Elasticsearch wins when both are declared.
 fn elastic_base_from(endpoints: &[ServiceEndpoint]) -> Option<String> {
     endpoints
         .iter()
         .find(|e| e.kind == ServiceKind::Elastic)
+        .or_else(|| endpoints.iter().find(|e| e.kind == ServiceKind::Opensearch))
         .map(|e| format!("http://127.0.0.1:{}", e.host_port))
 }
 
@@ -1458,7 +1464,11 @@ fn verify_elastic(base: &str, e: &crate::spec::ElasticAssertion) -> Vec<Assertio
 fn run_elastic(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
     let Some(e) = &check.elastic else { return };
     let Some(base) = elastic_base(ctx) else {
-        out.push(fail_elastic("elastic assertion but no Elasticsearch service is running".into()));
+        out.push(fail_elastic(
+            "elastic assertion but no Elasticsearch/OpenSearch service is running \
+             (add `elasticsearch` or `opensearch` to services)"
+                .into(),
+        ));
         return;
     };
 
@@ -1802,6 +1812,11 @@ fn run_mongo_verify(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out
     out.extend(last);
 }
 
+/// Retry budget for the acting (trigger) assertions. Deliberately short: a
+/// trigger should fire once and promptly — the patience belongs to the
+/// observers that wait for its effect.
+const TRIGGER_RETRY: Duration = Duration::from_secs(2);
+
 /// Run every selected check sequentially and collect results.
 /// How long the observe assertions should retry for eventual consistency.
 /// A plain async effect gets ~6s; an edge-case scenario floods the pipeline, so
@@ -1841,10 +1856,24 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
             // Edge-case scenarios (burst / concurrent / duplicates / out_of_order)
             // are a richer trigger — they flood Kafka to stress the pipeline.
             run_scenario(check, ctx, &mut assertions);
-            // Any async trigger (a Kafka produce, a scenario flood, or an HTTP
-            // call that kicks off background work) means the DB/Redis observers
-            // should be patient.
-            let async_effect = check.request.is_some()
+            // Registry assertions that ACT on the app — a GraphQL mutation, a
+            // gRPC call, a WebSocket `send` — are triggers too, so they run
+            // here, before the observers below. They used to run last, which
+            // made a single check that triggered over GraphQL/gRPC and observed
+            // in Postgres/Kafka impossible: the observers gave up before the
+            // trigger had fired, and the spec had to be split into two checks.
+            crate::checks::run_phase(
+                crate::checks::Phase::Trigger,
+                check,
+                ctx,
+                TRIGGER_RETRY,
+                &mut assertions,
+            );
+            // Any async trigger (a Kafka produce, a scenario flood, a GraphQL /
+            // gRPC call, or an HTTP call that kicks off background work) means
+            // the DB/Redis observers should be patient.
+            let async_effect = crate::checks::has_trigger_assertion(check)
+                || check.request.is_some()
                 || check.scenario.is_some()
                 || check
                     .kafka
@@ -1878,10 +1907,17 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
             // externals it called (both may lag the trigger → retry-aware).
             run_external_calls(check, ctx, retry_budget, &mut assertions);
             run_logs(check, ctx, retry_budget, &mut assertions);
-            // Extensible assertion types (graphql / metrics / snapshot / schema /
-            // sse / websocket / grpc / traces) — each pluggable via the checks
-            // registry (open/closed: new type = new file + one registry line).
-            crate::checks::run_all(check, ctx, retry_budget, &mut assertions);
+            // Observing registry assertions (metrics / snapshot / schema / sse /
+            // traces / clickhouse / cassandra / rabbitmq / security …) — each
+            // pluggable via the checks registry (open/closed: new type = new file
+            // + one registry line). The acting ones already ran above.
+            crate::checks::run_phase(
+                crate::checks::Phase::Observe,
+                check,
+                ctx,
+                retry_budget,
+                &mut assertions,
+            );
             if assertions.is_empty() {
                 error = Some("check declares no assertions (add request/expect, db, ...)".into());
             }
@@ -1902,6 +1938,38 @@ pub fn run_checks(checks: &[CheckSpec], ctx: &RunnerContext) -> Vec<CheckResult>
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn endpoint(kind: ServiceKind, host_port: u16) -> crate::lifecycle::ServiceEndpoint {
+        crate::lifecycle::ServiceEndpoint {
+            service: format!("{kind:?}").to_lowercase(),
+            kind,
+            host_port,
+            container_port: 9200,
+            aux_ports: Default::default(),
+        }
+    }
+
+    #[test]
+    fn elastic_assertions_accept_an_opensearch_service() {
+        // OpenSearch answers the same REST API; refusing it meant the app could
+        // write through OPENSEARCH_URL while the check claimed no service ran.
+        let base = elastic_base_from(&[endpoint(ServiceKind::Opensearch, 9999)]);
+        assert_eq!(base.as_deref(), Some("http://127.0.0.1:9999"));
+    }
+
+    #[test]
+    fn elasticsearch_wins_when_both_are_declared() {
+        let base = elastic_base_from(&[
+            endpoint(ServiceKind::Opensearch, 9999),
+            endpoint(ServiceKind::Elastic, 1234),
+        ]);
+        assert_eq!(base.as_deref(), Some("http://127.0.0.1:1234"));
+    }
+
+    #[test]
+    fn elastic_base_is_none_without_either() {
+        assert!(elastic_base_from(&[endpoint(ServiceKind::Redis, 6379)]).is_none());
+    }
 
     #[test]
     fn subset_matches_nested_objects() {

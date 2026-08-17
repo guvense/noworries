@@ -71,6 +71,16 @@ Baked-in Postgres/MySQL credentials are `noworries` / `noworries` / `noworries`
 resolves to the last one wired — pick per-part vars (`PGHOST` vs `MYSQL_HOST`) to
 disambiguate.
 
+`DATABASE_URL` is a **URL** (`mysql://user:pass@host:port/db`). Postgres clients
+(`lib/pq`, `pgx`, SQLAlchemy, JDBC via `SPRING_DATASOURCE_URL`) take it as-is,
+but Go's `go-sql-driver/mysql` wants a DSN (`user:pass@tcp(host:port)/db`) and
+rejects the URL form — build it from `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/
+`MYSQL_PASSWORD`/`MYSQL_DATABASE` rather than parsing `DATABASE_URL`.
+
+A healthy container is not always a ready protocol: RabbitMQ, MySQL/MariaDB and
+Cassandra accept TCP before they complete an application-level handshake, so the
+app's first `connect()` should sit in a short retry loop.
+
 **External dependencies.** Any [`externals`](configuration.md#externals-optional)
 the app calls out to (a partner sandbox, a separate auth server) are also injected
 into the app's environment here — the sandbox URL plus credential env vars

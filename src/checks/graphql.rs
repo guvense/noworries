@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value as Json};
 
-use super::{fail, pass, resolve_target, retry_until, yaml_json, Assertion};
+use super::{fail, pass, resolve_target, retry_until, yaml_json, Assertion, Phase};
 use crate::runner::{interpolate_json, matches_subset, AssertionResult, RunnerContext};
 use crate::spec::CheckSpec;
 
@@ -21,6 +21,17 @@ impl Assertion for GraphQl {
         let body = serde_json::to_string(&payload).unwrap_or_default();
 
         retry_until(retry, || evaluate(g, ctx, &url, &body))
+    }
+
+    /// A GraphQL call — a mutation especially — acts on the app, so it runs in
+    /// the trigger slot. Left among the observers it would fire *after* `db:` /
+    /// `kafka.expect_message` had already given up on its effect.
+    fn phase(&self, check: &CheckSpec) -> Phase {
+        if check.graphql.is_some() && super::observes_elsewhere(check) {
+            Phase::Trigger
+        } else {
+            Phase::Observe
+        }
     }
 }
 

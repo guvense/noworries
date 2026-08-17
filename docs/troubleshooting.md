@@ -72,3 +72,38 @@ install dir is on `PATH`:
 ```bash
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 ```
+
+### A service never becomes healthy
+
+`mariadb` needs its own readiness probe: MariaDB 11 removed the `mysql*`
+compatibility symlinks, so a `mysqladmin ping` healthcheck can never pass and
+the container sits in `running/unhealthy` until the run times out. Fixed in
+0.12 (`mariadb-admin ping`, falling back to `mysqladmin` for MariaDB 10.x). On
+an older build, pin `mariadb:10.11` or declare `mysql` instead.
+
+### `elastic assertion but no Elasticsearch/OpenSearch service is running`
+
+Declare `elasticsearch` or `opensearch` under `services:`. From 0.12 an
+`opensearch` container satisfies `elastic:` checks — it answers the same
+`_doc`/`_search`/`_refresh` API. Before that the app could write through the
+injected `OPENSEARCH_URL` while the check refused to read it back.
+
+### The app crashes on its first connection, but the container is healthy
+
+Container-healthy is not protocol-ready. RabbitMQ accepts TCP before the AMQP
+listener will complete a handshake, MySQL/MariaDB are still initializing on
+first boot, and Cassandra/Scylla take ~30s before CQL answers. Wrap the app's
+initial connect in a short retry loop (a few attempts, a couple of seconds
+apart) — standard client practice, and the usual cause of a startup crash in an
+otherwise green run.
+
+### A gRPC check can't reach the app
+
+There is no `${NOWORRIES_GRPC_PORT}`: relative paths (`sse`, `websocket`,
+`graphql`, `metrics`) resolve against the app's assigned HTTP port, but
+`grpc.target` is used verbatim. Serve gRPC on a port you set yourself
+(`app.env: { GRPC_PORT: "50551" }`) and hardcode the target. If grpcurl reports
+`server does not expose service`, reflection isn't usable — that happens when
+services are registered from dynamically built descriptors — so pass
+`protos: [orders.proto]` (paths resolve relative to the `noworries.yml`).
+

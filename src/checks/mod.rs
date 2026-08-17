@@ -29,11 +29,33 @@ pub mod sse;
 pub mod traces;
 pub mod websocket;
 
+/// When an assertion runs relative to the runner's built-in observers (`db`,
+/// `mysql`, `mongodb`, `redis`, `elastic`, `kafka.expect_message`).
+///
+/// The runner's order is seed → trigger → observe. An assertion that *acts* on
+/// the app (a GraphQL mutation, a gRPC call, a WebSocket `send`) belongs in the
+/// trigger slot: left among the observers it fires after `db:` and
+/// `kafka.expect_message` have already given up, so a check that triggers over
+/// GraphQL/gRPC and observes in Postgres/Kafka can never pass in one piece.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Acts on the app; runs before the observers.
+    Trigger,
+    /// Reads state; runs after the observers.
+    Observe,
+}
+
 /// The interface every extensible assertion implements.
 pub trait Assertion {
     /// Evaluate this assertion type for `check`. Return an empty vec if the check
     /// doesn't declare it. `retry` is the eventual-consistency budget.
     fn run(&self, check: &CheckSpec, ctx: &RunnerContext, retry: Duration) -> Vec<AssertionResult>;
+
+    /// When this assertion runs. Defaults to [`Phase::Observe`] — the safe
+    /// choice for anything that only reads state.
+    fn phase(&self, _check: &CheckSpec) -> Phase {
+        Phase::Observe
+    }
 }
 
 /// Registry / composition root: all extensible assertion types. Snapshot runs
@@ -55,11 +77,59 @@ pub fn registry() -> Vec<Box<dyn Assertion>> {
     ]
 }
 
-/// Run every registry assertion for a check, appending results to `out`.
-pub fn run_all(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
+/// Run the registry assertions belonging to `phase`, appending results to `out`.
+pub fn run_phase(
+    phase: Phase,
+    check: &CheckSpec,
+    ctx: &RunnerContext,
+    retry: Duration,
+    out: &mut Vec<AssertionResult>,
+) {
     for a in registry() {
-        out.extend(a.run(check, ctx, retry));
+        if a.phase(check) == phase {
+            out.extend(a.run(check, ctx, retry));
+        }
     }
+}
+
+/// Run every registry assertion for a check, in phase order.
+pub fn run_all(check: &CheckSpec, ctx: &RunnerContext, retry: Duration, out: &mut Vec<AssertionResult>) {
+    run_phase(Phase::Trigger, check, ctx, retry, out);
+    run_phase(Phase::Observe, check, ctx, retry, out);
+}
+
+/// True when the check declares an assertion that acts on the app, so the
+/// runner's observers should get the eventual-consistency retry budget.
+pub fn has_trigger_assertion(check: &CheckSpec) -> bool {
+    registry().iter().any(|a| a.phase(check) == Phase::Trigger)
+}
+
+/// True when the check observes state *outside* the acting assertion's own
+/// response — a datastore, a Kafka topic, a log, a mocked external.
+///
+/// This is what makes an acting assertion the check's **trigger**: a lone
+/// `graphql:` query is just an observer and keeps the full retry budget, while
+/// `graphql:` + `db:` means the GraphQL call produces the effect the `db:`
+/// assertion is waiting for, so it has to run first.
+pub(crate) fn observes_elsewhere(check: &CheckSpec) -> bool {
+    check.db.is_some()
+        || check.mysql.is_some()
+        || check.mongodb.is_some()
+        || check.redis.is_some()
+        || check.elastic.is_some()
+        || check.clickhouse.is_some()
+        || check.cassandra.is_some()
+        || check.rabbitmq.is_some()
+        || check.metrics.is_some()
+        || check.traces.is_some()
+        || check.logs.is_some()
+        || !check.external_calls.is_empty()
+        || check.sse.is_some()
+        || check
+            .kafka
+            .as_ref()
+            .map(|k| k.expect_message.is_some())
+            .unwrap_or(false)
 }
 
 // ---- shared helpers ----
@@ -125,4 +195,108 @@ where
         last = eval();
     }
     last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::NoworriesSpec;
+
+    fn check(yaml: &str) -> CheckSpec {
+        NoworriesSpec::parse(yaml).unwrap().checks.remove(0)
+    }
+
+    #[test]
+    fn acting_assertions_are_triggers_when_the_check_observes_elsewhere() {
+        let c = check(
+            r#"
+version: 1
+services: [postgres]
+checks:
+  - name: mutation then db
+    graphql: { path: /graphql, query: "mutation { create }" }
+    db: { query: "SELECT 1", expect_row_count: 1 }
+"#,
+        );
+        assert!(has_trigger_assertion(&c));
+        assert_eq!(graphql::GraphQl.phase(&c), Phase::Trigger);
+    }
+
+    #[test]
+    fn a_lone_graphql_query_stays_an_observer() {
+        // Nothing else to observe → it IS the observation, and keeps the full
+        // retry budget for an eventually-consistent read.
+        let c = check(
+            r#"
+version: 1
+services: [postgres]
+checks:
+  - name: just a query
+    graphql: { path: /graphql, query: "query { order }" }
+"#,
+        );
+        assert!(!has_trigger_assertion(&c));
+        assert_eq!(graphql::GraphQl.phase(&c), Phase::Observe);
+    }
+
+    #[test]
+    fn grpc_with_a_kafka_observer_is_a_trigger() {
+        let c = check(
+            r#"
+version: 1
+services: [kafka]
+checks:
+  - name: rpc then topic
+    grpc: { target: "127.0.0.1:50051", method: "orders.Svc/Create" }
+    kafka: { expect_message: { topic: t, contains: { id: "1" } } }
+"#,
+        );
+        assert_eq!(grpc::Grpc.phase(&c), Phase::Trigger);
+    }
+
+    #[test]
+    fn a_listening_websocket_is_not_a_trigger_but_a_sending_one_is() {
+        let listening = check(
+            r#"
+version: 1
+services: [postgres]
+checks:
+  - name: listen
+    request: { method: POST, path: /orders }
+    websocket: { url: /ws, expect_message: { type: OrderCreated } }
+    db: { query: "SELECT 1" }
+"#,
+        );
+        assert_eq!(websocket::WebSocket.phase(&listening), Phase::Observe);
+
+        let sending = check(
+            r#"
+version: 1
+services: [postgres]
+checks:
+  - name: send
+    websocket: { url: /ws, send: { subscribe: orders }, expect_message: { type: Ack } }
+    db: { query: "SELECT 1" }
+"#,
+        );
+        assert_eq!(websocket::WebSocket.phase(&sending), Phase::Trigger);
+    }
+
+    #[test]
+    fn pure_observers_never_claim_the_trigger_slot() {
+        let c = check(
+            r#"
+version: 1
+services: [postgres]
+checks:
+  - name: read only
+    request: { method: GET, path: /orders }
+    metrics: { path: /metrics, metric: m, expect: ">= 1" }
+    db: { query: "SELECT 1" }
+"#,
+        );
+        assert!(!has_trigger_assertion(&c));
+        assert_eq!(metrics::Metrics.phase(&c), Phase::Observe);
+        assert_eq!(schema::Schema.phase(&c), Phase::Observe);
+    }
 }
