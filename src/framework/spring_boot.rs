@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{generic_env, Framework};
+use super::{conventional_env, Framework};
 use crate::lifecycle::ServiceEndpoint;
 use crate::services::mssql::MSSQL_SA_PASSWORD;
 use crate::services::rabbitmq::{RABBITMQ_PASSWORD, RABBITMQ_USER};
@@ -42,7 +42,12 @@ impl Framework for SpringBoot {
     }
 
     fn env_wiring(&self, endpoints: &[ServiceEndpoint]) -> BTreeMap<String, String> {
-        let mut m = generic_env(endpoints);
+        // Start from the conventional connection vars, then layer Spring's own
+        // property names on top. Spring covers the datastores it has starters
+        // for, but a Spring app talking to ClickHouse or Cassandra uses a plain
+        // client that reads `CLICKHOUSE_URL` / `CASSANDRA_CONTACT_POINTS` — and
+        // withholding those left it with nothing but `NOWORRIES_*`.
+        let mut m = conventional_env(endpoints);
         for ep in endpoints {
             match ep.kind {
                 ServiceKind::Postgres => {

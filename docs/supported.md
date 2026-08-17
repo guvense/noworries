@@ -76,6 +76,13 @@ block (an ephemeral jobmanager + taskmanager session cluster) instead of
 `services:`, when the thing under test is a Flink job. See
 [configuration.md](configuration.md).
 
+SQL Server needs a complex password, so its SA login is `sa` / `Noworries!Pass1`
+(exported as `MSSQL_PASSWORD` and `MSSQL_SA_PASSWORD`) and no database is
+created — an app lands in `master`. ClickHouse is `noworries`/`noworries` with a
+`noworries` database, but its HTTP interface ignores the user's default
+database: use `CLICKHOUSE_DSN` (credentials + `?database=noworries`) rather than
+the bare `CLICKHOUSE_URL`.
+
 **Wire-compatible aliases** (`timescaledb`, `mariadb`, `scylladb`) reuse a
 peer's provider and checks — only the pulled image differs. `cockroachdb` and
 `opensearch` speak a peer's protocol but need their own container config, so

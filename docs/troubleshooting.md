@@ -100,7 +100,7 @@ otherwise green run.
 ### A gRPC check can't reach the app
 
 `grpc.target` is used verbatim — but the app's assigned port has a name:
-`${NOWORRIES_APP_PORT}` (0.12+; also `${NOWORRIES_APP_URL}`, the framework's
+`${NOWORRIES_APP_PORT}` (0.13+; also `${NOWORRIES_APP_URL}`, the framework's
 `${PORT}`/`${SERVER_PORT}`, and `${NOWORRIES_<SERVICE>_PORT}` for containers).
 A gRPC-only service listens on that port. If the app serves HTTP *and* gRPC,
 the second port is yours to choose: `app.env: { GRPC_PORT: "50551" }`, then

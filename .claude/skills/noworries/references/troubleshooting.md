@@ -19,5 +19,9 @@ _Reference for the `noworries` skill. Read this when a run fails for a reason th
 | `mariadb` service never becomes healthy (`running/unhealthy`) | needs noworries ≥ 0.12 — MariaDB 11 ships no `mysqladmin`, older builds probe with it and never pass |
 | `elastic assertion but no Elasticsearch/OpenSearch service` | declare `elasticsearch` or `opensearch` in `services:` (an `opensearch` container satisfies `elastic:` checks from 0.12) |
 | `could not run grpcurl` | `brew install grpcurl` (or add it to `PATH`) — the `grpc:` check shells out to it |
-| gRPC check can't reach the app | use `${NOWORRIES_APP_PORT}` in `grpc.target` (0.12+). An app serving HTTP *and* gRPC needs its own port: set `app.env: { GRPC_PORT: "50551" }` and use `${GRPC_PORT}` |
+| gRPC check can't reach the app | use `${NOWORRIES_APP_PORT}` in `grpc.target` (0.13+). An app serving HTTP *and* gRPC needs its own port: set `app.env: { GRPC_PORT: "50551" }` and use `${GRPC_PORT}` |
 | App crashed connecting to MySQL/Cassandra/RabbitMQ at startup | container-healthy ≠ protocol-ready — add a connect-retry loop in the app |
+| ClickHouse check finds nothing though the app wrote rows | the app wrote to `default`: the HTTP interface ignores the user's default DB. Use `${CLICKHOUSE_DSN}` (or `?database=noworries` / `noworries.<table>`) |
+| ClickHouse HTTP 403 | bare `CLICKHOUSE_URL` carries no credentials — use `${CLICKHOUSE_DSN}` or send basic auth `noworries`/`noworries` |
+| MSSQL login failed | SA password is `Noworries!Pass1` (`${MSSQL_PASSWORD}`); no database is created, so connect to `master` |
+| .NET app listens on 5000, health probe times out | `Properties/launchSettings.json` overrides the port in Development — keep `dotnet run --no-launch-profile` (0.13+ default) or set `ASPNETCORE_ENVIRONMENT=Production` |

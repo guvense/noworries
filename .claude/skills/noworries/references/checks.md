@@ -73,13 +73,13 @@ Field summary: **http** `request{method,path,headers,body}` + `expect{status,bod
 **logs** `contains[]`, `absent[]` (grep `.noworries/app.log`) ·
 **elastic** `index`, `template{name,body,legacy}`, `operations[{insert|update|delete}]`, `doc_id`, `expect_exists`, `expect_source_contains`, `query`, `expect_hits` ·
 **rabbitmq** `queue`, `vhost`, `expect_exists`, `min_messages`, `expect_messages` (queue depth via management API) ·
-**clickhouse** `query`, `expect_value`, `expect_row`, `expect_rows` (HTTP SQL) ·
+**clickhouse** `query`, `expect_value`, `expect_row`, `expect_rows` (HTTP SQL; the check queries the `noworries` database — make sure the app wrote there, see `services-and-env.md`. No `FORMAT` clause needed) ·
 **cassandra** `query`, `expect_value`, `expect_row`, `expect_rows` (CQL via cqlsh; also Scylla). **No `keyspace` field** — qualify tables in the query: `SELECT ... FROM app.orders` ·
 **security** `path`, `method`, `body`, `require_auth`, `reject_bad_input`, `no_error_leak`, `require_headers[]` (defensive abuse-case probes of the app under test) ·
 **graphql** `path`, `query`, `variables`, `expect_data`, `expect_no_errors` ·
 **metrics** `path`, `metric`, `labels`, `expect` (Prometheus). `expect` is a comparison string: `">= 1"`, `"> 0"`, `"<= 10"`, `"< 5"`, `"== 5"` (also `"= 5"`); a bare number means `== n` ·
 **snapshot** `file`, `ignore[]` (golden diff of the check's response). **First run writes the golden and passes only with `--update-snapshots`; later runs diff against it.** `ignore` items are a top-level key (`createdAt`) or a dotted path (`$.a.b` / `a.b`), blanked before comparing ·
-**schema** `table`, `has_columns[]`, `columns{col:type}` — types are Postgres `information_schema.data_type` spellings (`character varying`, not `varchar(64)`; `integer`, `timestamp without time zone`) ·
+**schema** `table`, `has_columns[]`, `columns{col:type}` — types are whatever that backend's `information_schema.data_type` returns: Postgres `character varying` / `integer` / `timestamp without time zone`; MySQL `varchar` / `int` / `datetime`; SQL Server `nvarchar` / `int` / `datetime2` (never `varchar(64)` — no length) ·
 **sse** `path`, `contains` (**a JSON object**, deep-subset against each event — `contains: { type: "OrderCreated" }`, not a bare string), `timeout_ms` · **websocket** `url` (relative path → `ws://<app>`), `send`, `expect_message` (JSON subset), `timeout_ms` ·
 **grpc** `target`, `method`, `data`, `expect_contains`, `protos[]`, `import_paths[]` (needs `grpcurl` on PATH; paths resolve relative to the `noworries.yml`) ·
 **traces** `query_url`, `service`, `operation`, `tags`, `min_count` (query Jaeger/Tempo for OTel spans).

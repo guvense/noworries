@@ -77,6 +77,15 @@ but Go's `go-sql-driver/mysql` wants a DSN (`user:pass@tcp(host:port)/db`) and
 rejects the URL form — build it from `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/
 `MYSQL_PASSWORD`/`MYSQL_DATABASE` rather than parsing `DATABASE_URL`.
 
+Services without a framework convention (SQL Server, ClickHouse, RabbitMQ,
+Cassandra, OpenSearch) export the conventional vars listed in
+[supported.md](supported.md) — `MSSQL_*`, `CLICKHOUSE_DSN`/`CLICKHOUSE_URL`,
+`RABBITMQ_URL`, `CASSANDRA_CONTACT_POINTS`, `OPENSEARCH_URL`. Spring apps get
+those **on top of** their `SPRING_*` properties, and an app whose framework
+wasn't detected gets them too (before 0.13 both cases fell back to the bare
+`NOWORRIES_*` host/port pairs, leaving the app with an address but no
+credentials).
+
 The **checks** get the same names for interpolation, plus
 `NOWORRIES_APP_HOST`/`_PORT`/`_URL` for the app itself — so a target that can't
 be relative (`grpc.target`, an absolute `ws://` URL) can say

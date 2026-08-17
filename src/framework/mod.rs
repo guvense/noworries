@@ -50,6 +50,14 @@ pub trait Framework {
     fn default_port_env(&self) -> &'static str {
         "SERVER_PORT"
     }
+    /// Extra variables the framework needs before it will actually bind `port`,
+    /// beyond [`Framework::default_port_env`]. ASP.NET Core is the case that
+    /// forced this: `ASPNETCORE_HTTP_PORTS` alone loses to the `applicationUrl`
+    /// in `Properties/launchSettings.json`, so the app kept listening on 5000
+    /// while noworries probed the port it had assigned.
+    fn port_env_extra(&self, _port: u16) -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
     /// Environment variables wiring the app to the resolved service endpoints.
     fn env_wiring(&self, endpoints: &[ServiceEndpoint]) -> BTreeMap<String, String>;
 }
@@ -175,6 +183,17 @@ pub fn conventional_env(endpoints: &[ServiceEndpoint]) -> BTreeMap<String, Strin
                 m.insert("MSSQL_PORT".to_string(), p.to_string());
                 m.insert("MSSQL_USER".to_string(), "sa".to_string());
                 m.insert("MSSQL_SA_PASSWORD".to_string(), MSSQL_SA_PASSWORD.to_string());
+                // `MSSQL_PASSWORD` is what most drivers/docs reach for; the
+                // container image's own name is MSSQL_SA_PASSWORD, so ship both.
+                m.insert("MSSQL_PASSWORD".to_string(), MSSQL_SA_PASSWORD.to_string());
+                // No database is created for you — SQL Server starts with the
+                // system databases, so `master` is where an app lands unless it
+                // creates its own.
+                m.insert("MSSQL_DATABASE".to_string(), "master".to_string());
+                m.insert(
+                    "MSSQL_JDBC_URL".to_string(),
+                    format!("jdbc:sqlserver://{host}:{p};encrypt=false;trustServerCertificate=true"),
+                );
             }
             ServiceKind::Rabbitmq => {
                 let url = format!("amqp://{RABBITMQ_USER}:{RABBITMQ_PASSWORD}@{host}:{p}");
@@ -183,6 +202,16 @@ pub fn conventional_env(endpoints: &[ServiceEndpoint]) -> BTreeMap<String, Strin
             }
             ServiceKind::Clickhouse => {
                 m.insert("CLICKHOUSE_URL".to_string(), format!("http://{host}:{p}"));
+                // ClickHouse's HTTP interface ignores the user's default
+                // database: without `?database=`, statements land in `default`
+                // while the check looks in `noworries`. This DSN carries both
+                // the credentials and the database, so it just works.
+                m.insert(
+                    "CLICKHOUSE_DSN".to_string(),
+                    format!(
+                        "http://{CLICKHOUSE_USER}:{CLICKHOUSE_PASSWORD}@{host}:{p}/?database={CLICKHOUSE_DB}"
+                    ),
+                );
                 m.insert("CLICKHOUSE_HOST".to_string(), host.to_string());
                 m.insert("CLICKHOUSE_PORT".to_string(), p.to_string());
                 m.insert("CLICKHOUSE_USER".to_string(), CLICKHOUSE_USER.to_string());
@@ -396,5 +425,67 @@ mod tests {
         assert_eq!(env.get("ELASTICSEARCH_URL").map(|s| s.as_str()), Some("http://127.0.0.1:10005"));
         // generic fallback vars still present
         assert_eq!(env.get("NOWORRIES_REDIS_PORT").map(|s| s.as_str()), Some("10003"));
+    }
+
+    fn ep(kind: ServiceKind, host_port: u16) -> ServiceEndpoint {
+        ServiceEndpoint {
+            service: "svc".into(),
+            kind,
+            host_port,
+            container_port: 1433,
+            aux_ports: Default::default(),
+        }
+    }
+
+    #[test]
+    fn mssql_ships_the_password_under_both_names_and_a_database() {
+        let env = conventional_env(&[ep(ServiceKind::Mssql, 14330)]);
+        assert_eq!(env["MSSQL_USER"], "sa");
+        assert_eq!(env["MSSQL_PASSWORD"], env["MSSQL_SA_PASSWORD"]);
+        // SQL Server creates no database of its own — `master` is where an app
+        // lands, and saying so beats leaving it to be discovered.
+        assert_eq!(env["MSSQL_DATABASE"], "master");
+        assert!(env["MSSQL_JDBC_URL"].contains("jdbc:sqlserver://127.0.0.1:14330"));
+    }
+
+    #[test]
+    fn clickhouse_dsn_carries_credentials_and_the_database() {
+        // The HTTP interface ignores the user's default database, so a bare
+        // CLICKHOUSE_URL silently writes to `default`.
+        let env = conventional_env(&[ep(ServiceKind::Clickhouse, 8124)]);
+        assert_eq!(env["CLICKHOUSE_URL"], "http://127.0.0.1:8124");
+        assert_eq!(
+            env["CLICKHOUSE_DSN"],
+            "http://noworries:noworries@127.0.0.1:8124/?database=noworries"
+        );
+    }
+
+    #[test]
+    fn spring_apps_still_get_the_conventional_vars() {
+        // Spring has no starter for ClickHouse; the app uses a plain client
+        // that reads CLICKHOUSE_URL, which used to be missing entirely.
+        let env = SpringBoot.env_wiring(&[
+            ep(ServiceKind::Clickhouse, 8124),
+            ep(ServiceKind::Postgres, 5433),
+        ]);
+        assert!(env.contains_key("CLICKHOUSE_URL"));
+        assert!(env.contains_key("CLICKHOUSE_DSN"));
+        // ...without losing Spring's own property names.
+        assert!(env["SPRING_DATASOURCE_URL"].starts_with("jdbc:postgresql://"));
+        assert!(env.contains_key("NOWORRIES_POSTGRES_PORT"));
+    }
+
+    #[test]
+    fn dotnet_binds_the_assigned_port_unambiguously() {
+        // ASPNETCORE_HTTP_PORTS alone loses to launchSettings.json.
+        let extra = DotNet.port_env_extra(5123);
+        assert_eq!(extra["ASPNETCORE_URLS"], "http://0.0.0.0:5123");
+        let dir = std::env::temp_dir();
+        assert_eq!(
+            DotNet.default_start_command(&dir).as_deref(),
+            Some("dotnet run --no-launch-profile")
+        );
+        // Other frameworks add nothing.
+        assert!(Go.port_env_extra(1).is_empty());
     }
 }

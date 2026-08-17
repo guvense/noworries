@@ -164,7 +164,11 @@ pub fn build_env(
 ) -> BTreeMap<String, String> {
     let mut env = match fw {
         Some(f) => f.env_wiring(endpoints),
-        None => framework::generic_env(endpoints),
+        // Detection failed (or was overridden with a bare `app.start`): the
+        // conventional connection vars are framework-agnostic, so there is no
+        // reason to fall back to the bare `NOWORRIES_*` set and leave the app
+        // with a host and port but no credentials.
+        None => framework::conventional_env(endpoints),
     };
     // External/upstream dependency wiring (URLs + credentials) sits above the
     // framework's service wiring but below `app.env`, so an explicit `app.env`
@@ -173,6 +177,13 @@ pub fn build_env(
         env.insert(k.clone(), v.clone());
     }
     env.insert(port_env_name(app, fw), port.to_string());
+    // Anything else the framework needs before it will bind that port (e.g.
+    // ASPNETCORE_URLS). Below app.env, so a spec can still override it.
+    if let Some(f) = fw {
+        for (k, v) in f.port_env_extra(port) {
+            env.insert(k, v);
+        }
+    }
     if let Some(a) = app {
         for (k, v) in &a.env {
             // Interpolate ${VAR} so `app.env: { X: "${SECRET}" }` resolves from

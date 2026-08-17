@@ -13,10 +13,26 @@ _Reference for the `noworries` skill. Read this when choosing `services:` or whe
 services: [ postgres:16-alpine, mysql, mongodb, redis, kafka, elastic ]
 ```
 
-Container credentials are `noworries`/`noworries`/`noworries` where applicable
-(postgres, mysql/mariadb, clickhouse; SQL Server SA password `Noworries!Pass1`).
-Mongo/redis/kafka/elastic/cassandra run without auth; rabbitmq is
-`noworries`/`noworries`. Wire-compatible aliases reuse a peer's provider/checks:
+**Container credentials** — `noworries` / `noworries` / `noworries`
+(user/password/database) wherever a service takes them:
+
+| Service | User | Password | Database |
+| ------- | ---- | -------- | -------- |
+| postgres, timescaledb | `noworries` | `noworries` | `noworries` |
+| mysql, mariadb | `noworries` | `noworries` | `noworries` |
+| clickhouse | `noworries` | `noworries` | `noworries` (**not** applied over HTTP — see below) |
+| rabbitmq | `noworries` | `noworries` | — |
+| **mssql** | `sa` | **`Noworries!Pass1`** (SQL Server rejects a simple one) | none created — you land in `master` |
+| cockroachdb | `root` | *(none, insecure single node)* | `defaultdb` |
+| mongo, redis, kafka, elastic, opensearch, cassandra, scylla | *(no auth)* | | |
+
+**ClickHouse's default database is not applied over HTTP.** `CLICKHOUSE_DB`
+makes `noworries` the *user's* default, but the HTTP interface ignores that:
+statements without `?database=noworries` (or a `noworries.<table>` qualifier)
+land in `default`, and then the check looks in the right database and finds
+nothing. Use the ready-made `${CLICKHOUSE_DSN}` — it carries the credentials
+*and* `?database=noworries`. Bare `CLICKHOUSE_URL` has neither, so a plain
+client gets HTTP 403 until it adds basic auth. Wire-compatible aliases reuse a peer's provider/checks:
 `timescaledb`+`mariadb` → Postgres/MySQL, `scylladb` → Cassandra (only the image
 differs). `cockroachdb`/`opensearch` are Postgres-/Elasticsearch-compatible but
 distinct kinds. See docs/supported.md for the full table.
@@ -25,8 +41,9 @@ distinct kinds. See docs/supported.md for the full table.
 container's healthcheck, but several servers accept TCP before they will finish
 an application-level handshake: RabbitMQ (first `connect()` can still get
 ECONNRESET), MySQL/MariaDB (the daemon is still initializing on first boot),
-Cassandra/Scylla (~30s before CQL answers). **Give the app a short connect-retry
-loop** — a few attempts a couple of seconds apart. This is ordinary client
+Cassandra/Scylla (~30s before CQL answers), and SQL Server on Apple Silicon
+(~30s, running under emulation — the first 5-6 connects fail). **Give the app a
+short connect-retry loop** — a few attempts a couple of seconds apart. This is ordinary client
 practice, not a noworries quirk, and it is the single most common cause of an
 app that "crashed at startup" in an otherwise green run.
 
@@ -66,6 +83,13 @@ others wait for the TCP port (`health: none`) unless you set `app.health`.
   `daphne`/`uvicorn`. Migrations are not run for you either; use a wrapper
   (`app.start: "./start.sh"` doing `migrate` then serving) or top-level `setup:`,
   and make sure migration files are committed (`makemigrations` first).
+- **.NET:** noworries starts the app with `dotnet run --no-launch-profile` and
+  sets `ASPNETCORE_URLS` — `dotnet new web` scaffolds a
+  `Properties/launchSettings.json` whose `applicationUrl` (5000/7001) otherwise
+  wins in Development and leaves the app on the wrong port while the health
+  probe times out. If you override `app.start`, keep `--no-launch-profile` (or
+  set `ASPNETCORE_ENVIRONMENT=Production`, or delete the file). On macOS install
+  the SDK with `brew install dotnet` — the `--cask dotnet-sdk` route wants sudo.
 - **Node:** a Kafka client that batches (kafka-go's default `BatchSize=100`,
   `BatchTimeout=1s`) delays a single message by ~1s — raise
   `kafka.expect_message.timeout_ms` or flush explicitly.
@@ -85,6 +109,12 @@ usually **don't need to touch config files**.
 | redis     | `SPRING_DATA_REDIS_HOST`, `SPRING_DATA_REDIS_PORT` |
 | kafka     | `SPRING_KAFKA_BOOTSTRAP_SERVERS` |
 | elastic   | `SPRING_ELASTICSEARCH_URIS` |
+| mssql     | `SPRING_DATASOURCE_URL` (jdbc:sqlserver), `..._USERNAME` (`sa`), `..._PASSWORD` |
+| rabbitmq  | `SPRING_RABBITMQ_HOST`/`_PORT`/`_USERNAME`/`_PASSWORD` |
+
+Spring apps **also** get the conventional vars from the table below (Spring has
+no starter for ClickHouse or Cassandra, so those clients read `CLICKHOUSE_DSN` /
+`CASSANDRA_CONTACT_POINTS` like anywhere else).
 
 **Go / FastAPI / Node.js / Django / Rails / .NET** (conventional connection
 strings — read whichever your client expects):
@@ -97,6 +127,11 @@ strings — read whichever your client expects):
 | redis     | `REDIS_URL`, `REDIS_HOST`, `REDIS_PORT` |
 | kafka     | `KAFKA_BROKERS`, `KAFKA_BOOTSTRAP_SERVERS` |
 | elastic   | `ELASTICSEARCH_URL`, `ELASTIC_URL` |
+| opensearch | `OPENSEARCH_URL`, `ELASTICSEARCH_URL` |
+| mssql     | `DATABASE_URL` (sqlserver://), `MSSQL_HOST`/`MSSQL_PORT`/`MSSQL_USER`/`MSSQL_PASSWORD` (= `MSSQL_SA_PASSWORD`)/`MSSQL_DATABASE` (`master`), `MSSQL_JDBC_URL` |
+| clickhouse | `CLICKHOUSE_DSN` (**use this** — credentials + `?database=noworries`), `CLICKHOUSE_URL` (bare), `CLICKHOUSE_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_DATABASE` |
+| rabbitmq  | `RABBITMQ_URL`, `AMQP_URL` (both carry `noworries:noworries@`) |
+| cassandra | `CASSANDRA_CONTACT_POINTS` (host only, comma-separated for a cluster; single node here), `CASSANDRA_HOST`, `CASSANDRA_PORT` |
 
 **Laravel** gets the conventional vars above **plus** its native discrete keys:
 `DB_CONNECTION` (`pgsql`/`mysql`), `DB_HOST`/`DB_PORT`/`DB_DATABASE`/
