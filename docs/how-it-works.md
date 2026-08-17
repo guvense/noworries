@@ -82,7 +82,7 @@ Cassandra, OpenSearch) export the conventional vars listed in
 [supported.md](supported.md) — `MSSQL_*`, `CLICKHOUSE_DSN`/`CLICKHOUSE_URL`,
 `RABBITMQ_URL`, `CASSANDRA_CONTACT_POINTS`, `OPENSEARCH_URL`. Spring apps get
 those **on top of** their `SPRING_*` properties, and an app whose framework
-wasn't detected gets them too (before 0.13 both cases fell back to the bare
+wasn't detected gets them too (before 0.14 both cases fell back to the bare
 `NOWORRIES_*` host/port pairs, leaving the app with an address but no
 credentials).
 
