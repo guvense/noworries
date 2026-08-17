@@ -16,14 +16,19 @@ impl Assertion for Metrics {
     fn run(&self, check: &CheckSpec, ctx: &RunnerContext, retry: Duration) -> Vec<AssertionResult> {
         let Some(m) = &check.metrics else { return vec![] };
         let url = resolve_target(&m.path, ctx, &["http://", "https://"]);
-        retry_until(retry, || vec![evaluate(m, ctx, &url)])
+        let (auth_headers, _) = ctx.auth_for(check);
+        retry_until(retry, || vec![evaluate(m, auth_headers, &url)])
     }
 }
 
-fn evaluate(m: &crate::spec::MetricsAssertion, ctx: &RunnerContext, url: &str) -> AssertionResult {
+fn evaluate(
+    m: &crate::spec::MetricsAssertion,
+    auth_headers: &[(String, String)],
+    url: &str,
+) -> AssertionResult {
     let agent = super::http_agent(Duration::from_secs(15));
     let mut req = agent.get(url);
-    for (k, v) in &ctx.auth_headers {
+    for (k, v) in auth_headers {
         req = req.set(k, v);
     }
     let text = match req.call() {

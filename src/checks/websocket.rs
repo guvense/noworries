@@ -22,7 +22,7 @@ impl Assertion for WebSocket {
         let timeout = Duration::from_millis(w.timeout_ms.unwrap_or(5000));
         let expected = yaml_json(&w.expect_message);
 
-        match evaluate(w, ctx, &url, &expected, timeout) {
+        match evaluate(w, ctx, ctx.auth_for(check).0, &url, &expected, timeout) {
             Ok(true) => vec![pass("websocket", format!("matching message from {}", w.url))],
             Ok(false) => vec![fail(
                 "websocket",
@@ -47,6 +47,7 @@ impl Assertion for WebSocket {
 fn evaluate(
     w: &crate::spec::WebsocketAssertion,
     ctx: &RunnerContext,
+    auth_headers: &[(String, String)],
     url: &str,
     expected: &Json,
     timeout: Duration,
@@ -60,7 +61,7 @@ fn evaluate(
     let mut request = url
         .into_client_request()
         .map_err(|e| format!("bad ws url {url}: {e}"))?;
-    for (k, v) in &ctx.auth_headers {
+    for (k, v) in auth_headers {
         if let (Ok(name), Ok(val)) = (
             HeaderName::from_bytes(k.as_bytes()),
             HeaderValue::from_str(v),

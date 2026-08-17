@@ -190,6 +190,53 @@ grpcurl reporting "server does not expose service", so pass
 `protos: [orders.proto]` (resolved relative to the `noworries.yml`); and
 `grpcurl` must be on `PATH` (`brew install grpcurl`).
 
+## Identities: `auth`, `users` and `as`
+
+`auth:` authenticates **noworries → the app** for every check. Pick the block
+that matches the app: `login` (run a login request, extract a token), `bearer`,
+`basic`, `api_key`, or `oidc`.
+
+`oidc:` is the one to reach for behind Keycloak / Auth0 / Cognito / Entra —
+noworries fetches the token itself instead of you hand-rolling `login`:
+
+```yaml
+auth:
+  oidc:
+    issuer: "https://id.example.com/realms/app"   # discovery; or token_url: ...
+    client_id: orders-app
+    client_secret: "${OIDC_SECRET}"               # omit for a public client
+    scope: "orders:read orders:write"
+    # audience: "https://api.example.com"   # Auth0 needs it for a JWT
+    # grant: password + username/password  # resource-owner flow
+    # client_auth: basic                   # Cognito wants the secret in a header
+```
+
+For **RBAC**, declare the roles once and pick one per check — this is the whole
+point of `users:` + `as:`, and the only way to assert "this role may, that role
+may not":
+
+```yaml
+users:
+  admin:  { oidc: { issuer: "${ISSUER}", client_id: admin-cli, client_secret: "${ADMIN_SECRET}" } }
+  reader: { bearer: { token: "${READER_TOKEN}" } }
+checks:
+  - name: "an admin can delete an order"
+    as: admin
+    request: { method: DELETE, path: /orders/1 }
+    expect:  { status: 204 }
+  - name: "a reader cannot"
+    as: reader
+    request: { method: DELETE, path: /orders/2 }
+    expect:  { status: 403 }
+```
+
+Each identity is resolved once, before the checks run. A check without `as:`
+uses the top-level `auth:`. An `as:` naming an undeclared user fails at parse
+time — deliberately, since falling back to the default identity would make an
+RBAC check pass for the wrong reason. The identity covers the whole check, not
+only `request:` — `graphql`, `sse`, `websocket`, `grpc`, `metrics`, `traces` and
+the `security` probes all send it.
+
 ## Secrets and auth in a spec
 
 Reference `${VAR}` in `auth`/`externals`/headers/body; put the values in a

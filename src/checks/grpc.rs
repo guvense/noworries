@@ -25,7 +25,7 @@ impl Assertion for Grpc {
 
         let mut args = grpcurl_args(g, &target, data.as_deref());
         // Forward auth headers (from `auth`) as gRPC metadata.
-        for (k, v) in &ctx.auth_headers {
+        for (k, v) in ctx.auth_for(check).0 {
             args.insert(0, format!("{k}: {v}"));
             args.insert(0, "-H".to_string());
         }

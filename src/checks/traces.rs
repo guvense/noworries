@@ -23,7 +23,7 @@ impl Assertion for Traces {
         retry_until(retry, || {
             let agent = super::http_agent(Duration::from_secs(15));
             let mut get = agent.get(&url);
-            for (k, v) in &ctx.auth_headers {
+            for (k, v) in ctx.auth_for(check).0 {
                 get = get.set(k, v);
             }
             let text = match get.call() {

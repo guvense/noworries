@@ -26,3 +26,6 @@ _Reference for the `noworries` skill. Read this when a run fails for a reason th
 | MSSQL login failed | SA password is `Noworries!Pass1` (`${MSSQL_PASSWORD}`); no database is created, so connect to `master` |
 | .NET app listens on 5000, health probe times out | `Properties/launchSettings.json` overrides the port in Development — keep `dotnet run --no-launch-profile` (0.14+ default) or set `ASPNETCORE_ENVIRONMENT=Production` |
 | `db assertion but no Postgres-wire service is running` | declare `postgres`, `timescaledb` or `cockroachdb`. A `cockroachdb` service satisfies `db:`/`schema:` from 0.15 — older builds matched `postgres` only, so the workaround was an HTTP round-trip through the app |
+| `auth.oidc discovery ... returned HTTP 404` | the issuer is wrong — discovery is `<issuer>/.well-known/openid-configuration` (Keycloak: `https://host/realms/<realm>`). Or skip it with `token_url:` |
+| `auth.oidc token request ... invalid_client` | wrong `client_id`/`client_secret`, or the provider wants the secret in a header — set `client_auth: basic` (Cognito) |
+| `runs as "x", which is not declared under "users"` | typo in a check's `as:`; the message lists the declared identities |

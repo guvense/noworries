@@ -21,7 +21,7 @@ impl Assertion for Sse {
 
         let agent = super::http_agent(timeout + Duration::from_secs(2));
         let mut req = agent.get(&url).set("accept", "text/event-stream");
-        for (k, v) in &ctx.auth_headers {
+        for (k, v) in ctx.auth_for(check).0 {
             req = req.set(k, v);
         }
         let resp = match req.call() {

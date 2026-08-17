@@ -20,7 +20,8 @@ impl Assertion for GraphQl {
         }
         let body = serde_json::to_string(&payload).unwrap_or_default();
 
-        retry_until(retry, || evaluate(g, ctx, &url, &body))
+        let (auth_headers, _) = ctx.auth_for(check);
+        retry_until(retry, || evaluate(g, auth_headers, &url, &body))
     }
 
     /// A GraphQL call — a mutation especially — acts on the app, so it runs in
@@ -37,13 +38,13 @@ impl Assertion for GraphQl {
 
 fn evaluate(
     g: &crate::spec::GraphqlAssertion,
-    ctx: &RunnerContext,
+    auth_headers: &[(String, String)],
     url: &str,
     body: &str,
 ) -> Vec<AssertionResult> {
     let agent = super::http_agent(Duration::from_secs(15));
     let mut req = agent.post(url).set("content-type", "application/json");
-    for (k, v) in &ctx.auth_headers {
+    for (k, v) in auth_headers {
         req = req.set(k, v);
     }
     let resp = match req.send_string(body) {

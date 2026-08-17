@@ -83,8 +83,9 @@ impl Assertion for Security {
             .map(|b| interpolate_json(&yaml_json(&b), &ctx.env));
 
         let base_url = format!("http://127.0.0.1:{}{}", ctx.app_port, path);
-        let authed_url = with_query(&base_url, &ctx.auth_query);
-        let auth_headers: BTreeMap<String, String> = ctx.auth_headers.iter().cloned().collect();
+        let (id_headers, id_query) = ctx.auth_for(check);
+        let authed_url = with_query(&base_url, id_query);
+        let auth_headers: BTreeMap<String, String> = id_headers.iter().cloned().collect();
 
         let mut out = Vec::new();
 

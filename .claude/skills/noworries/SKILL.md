@@ -39,6 +39,8 @@ Exit code: `0` READY, `1` NOT READY/error, `2` not confirmed.
    - New or changed endpoint → add a defensive `security:` check (auth enforced,
      hostile input doesn't 5xx, no error leak, security headers). It probes only
      the app under test and asserts safe handling.
+   - Endpoint that only some roles may call → declare the roles under `users:`
+     and write one check per role with `as:` (`references/checks.md`).
    - Flink job instead of an HTTP app → `references/flink.md`.
    - App calls an upstream noworries can't run → `references/externals.md`.
 2. **Write/update `noworries.yml`** (shape below; full field reference in
@@ -62,7 +64,9 @@ app:                          # optional; auto-detected from mvnw/gradlew/go.mod
   start: "./mvnw spring-boot:run"
   health: "/actuator/health"
 auth:                         # optional; applied to every request. ${VAR} from .noworries.env
-  bearer: { token: "${API_TOKEN}" }
+  bearer: { token: "${API_TOKEN}" }   # or login / basic / api_key / oidc
+users:                        # optional; named identities for RBAC checks
+  reader: { bearer: { token: "${READER_TOKEN}" } }
 checks:
   - name: "create order: 201, persists, emits"
     tags: [orders]

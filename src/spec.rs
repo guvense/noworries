@@ -469,6 +469,62 @@ pub struct AuthSpec {
     /// API key sent as a header and/or a query parameter.
     #[serde(default)]
     pub api_key: Option<AuthApiKey>,
+    /// OpenID Connect / OAuth2: fetch a token from the provider and send it as
+    /// a bearer. Covers Keycloak / Auth0 / Cognito / Entra without hand-rolling
+    /// the token request as an `auth.login`.
+    #[serde(default)]
+    pub oidc: Option<AuthOidc>,
+}
+
+/// OAuth2 / OpenID Connect token acquisition.
+///
+/// Give `issuer` and the token endpoint is read from
+/// `<issuer>/.well-known/openid-configuration`; give `token_url` to skip
+/// discovery (or when the provider doesn't publish a document).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AuthOidc {
+    /// Issuer base URL — discovery reads `<issuer>/.well-known/openid-configuration`.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// Token endpoint, used as-is instead of discovery.
+    #[serde(default)]
+    pub token_url: Option<String>,
+    pub client_id: String,
+    /// Confidential clients only; omit for a public client.
+    #[serde(default)]
+    pub client_secret: Option<String>,
+    /// `client_credentials` (default) or `password`.
+    #[serde(default)]
+    pub grant: Option<String>,
+    /// Resource-owner credentials, for `grant: password`.
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Space-separated scopes.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// `audience` parameter (Auth0 requires it to get a JWT for your API).
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// How the client secret is presented: `post` (default, in the form body)
+    /// or `basic` (an `Authorization: Basic` header — Cognito requires this for
+    /// clients that have a secret).
+    #[serde(default)]
+    pub client_auth: Option<String>,
+    /// Extra form parameters passed through verbatim.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// JSON path to the token in the response (default `$.access_token`).
+    #[serde(default)]
+    pub token_from: Option<String>,
+    /// Header to place the token in (default `Authorization`).
+    #[serde(default)]
+    pub header: Option<String>,
+    /// Scheme prefix (default `Bearer`; empty string = raw token).
+    #[serde(default)]
+    pub scheme: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -734,6 +790,11 @@ pub struct CheckSpec {
     pub name: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Run this check as one of the `users:` identities instead of the
+    /// top-level `auth:` — the way to exercise RBAC (same request, different
+    /// role, different expected status).
+    #[serde(default, rename = "as")]
+    pub as_user: Option<String>,
     #[serde(default)]
     pub request: Option<HttpRequestSpec>,
     #[serde(default)]
@@ -1098,6 +1159,8 @@ struct RawSpec {
     #[serde(default)]
     auth: Option<AuthSpec>,
     #[serde(default)]
+    users: BTreeMap<String, AuthSpec>,
+    #[serde(default)]
     checks: Vec<CheckSpec>,
 }
 
@@ -1114,6 +1177,9 @@ pub struct NoworriesSpec {
     /// Prisma, Alembic, raw SQL, …).
     pub setup: Vec<String>,
     pub auth: Option<AuthSpec>,
+    /// Named identities a check can select with `as:` — one entry per role, each
+    /// the same shape as `auth:`. Resolved once, before the checks run.
+    pub users: BTreeMap<String, AuthSpec>,
     pub checks: Vec<CheckSpec>,
 }
 
@@ -1139,6 +1205,23 @@ impl NoworriesSpec {
             if c.name.trim().is_empty() {
                 bail!("{SPEC_FILENAME}: every check needs a non-empty \"name\".");
             }
+            // Catch a typo here rather than silently running the check as the
+            // default identity — an RBAC check that quietly used the wrong user
+            // would pass for the wrong reason.
+            if let Some(user) = &c.as_user {
+                if !raw.users.contains_key(user) {
+                    let known: Vec<&str> = raw.users.keys().map(|k| k.as_str()).collect();
+                    bail!(
+                        "{SPEC_FILENAME}: check \"{}\" runs as \"{user}\", which is not declared under \"users\"{}",
+                        c.name,
+                        if known.is_empty() {
+                            " (no users are declared)".to_string()
+                        } else {
+                            format!(" (declared: {})", known.join(", "))
+                        }
+                    );
+                }
+            }
         }
         if let Some(f) = &raw.flink {
             if f.jobs.is_empty() {
@@ -1163,6 +1246,7 @@ impl NoworriesSpec {
             externals: raw.externals,
             setup: raw.setup,
             auth: raw.auth,
+            users: raw.users,
             checks: raw.checks,
         })
     }

@@ -328,6 +328,13 @@ auth:
   # 4) API key as a header and/or query param:
   # api_key: { header: "X-API-Key", value: "${API_KEY}" }
   # api_key: { query: "api_key", value: "${API_KEY}" }
+
+  # 5) OpenID Connect / OAuth2 — noworries fetches the token itself:
+  # oidc:
+  #   issuer: "https://id.example.com/realms/app"   # discovery finds token_endpoint
+  #   client_id: orders-app
+  #   client_secret: "${OIDC_SECRET}"
+  #   scope: "orders:read orders:write"
 ```
 
 | Sub-block | Effect |
@@ -336,6 +343,72 @@ auth:
 | `bearer`  | Adds `<scheme> <token>` to `header` (defaults: `Bearer`, `Authorization`). |
 | `basic`   | Adds `Authorization: Basic base64(user:pass)`. |
 | `api_key` | Adds the key as a header and/or a query parameter (defaults to header `X-API-Key`). |
+| `oidc`    | Fetches a token from an OAuth2/OIDC provider and adds it as a bearer. See below. |
+
+### `auth.oidc` — Keycloak / Auth0 / Cognito / Entra
+
+Instead of hand-rolling the token request as an `auth.login`, declare the
+provider and let noworries do the round-trip. With `issuer`, the token endpoint
+is read from `<issuer>/.well-known/openid-configuration`; with `token_url` the
+discovery step is skipped.
+
+```yaml
+auth:
+  oidc:
+    issuer: "https://id.example.com/realms/app"
+    # token_url: "https://id.example.com/realms/app/protocol/openid-connect/token"
+    client_id: orders-app
+    client_secret: "${OIDC_SECRET}"   # omit for a public client
+    grant: client_credentials         # default; or `password`
+    # username: "${TEST_USER}"        # grant: password only
+    # password: "${TEST_PASS}"
+    scope: "orders:read orders:write"
+    audience: "https://api.example.com"   # Auth0 needs this to issue a JWT for your API
+    client_auth: post                 # default; `basic` puts the secret in an
+                                      # Authorization header (Cognito requires it)
+    params: { resource: "api://orders" }  # anything else the provider wants
+    token_from: "$.access_token"      # default
+    header: Authorization             # default
+    scheme: Bearer                    # default ("" = raw token)
+```
+
+A failing token request aborts the run and passes the provider's own reason
+through (`invalid_client`, `invalid_scope`, `unauthorized_client`) — that error
+body is the only useful diagnostic when a client is misconfigured.
+
+## `users` (optional)
+
+Named identities, each the same shape as `auth:`. A check selects one with
+`as:`; a check without `as:` uses the top-level `auth:`. This is how you test
+role-based access: same request, different role, different expected status.
+
+```yaml
+auth:
+  login: { request: { method: POST, path: /auth/login, body: { u: "${U}", p: "${P}" } }, token_from: "$.token" }
+users:
+  admin:
+    oidc: { issuer: "${ISSUER}", client_id: admin-cli, client_secret: "${ADMIN_SECRET}" }
+  reader:
+    login: { request: { method: POST, path: /auth/login, body: { u: reader, p: "${READER_PASS}" } }, token_from: "$.token" }
+checks:
+  - name: "an admin can delete an order"
+    as: admin
+    request: { method: DELETE, path: /orders/1 }
+    expect:  { status: 204 }
+
+  - name: "a reader cannot"
+    as: reader
+    request: { method: DELETE, path: /orders/2 }
+    expect:  { status: 403 }
+```
+
+Every identity is resolved **once**, before the checks run, so a login or token
+round-trip happens per identity rather than per check. An `as:` naming an
+undeclared user is rejected when the spec is parsed — otherwise the check would
+silently run as the default identity and an RBAC assertion could pass for the
+wrong reason. The identity applies to the whole check, not just its HTTP
+request: `graphql`, `sse`, `websocket`, `grpc`, `metrics`, `traces` and
+`security` probes all use it too.
 
 `${VAR}` interpolation also works inside a check's `request` headers, path, and
 body — e.g. `Authorization: "Bearer ${API_TOKEN}"` on a single check.

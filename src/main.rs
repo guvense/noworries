@@ -428,12 +428,27 @@ fn template_for(feature: &str) -> Option<&'static str> {
         }
         "auth" => {
             r#"
-# --- auth: applied to every check request (login | bearer | basic | api_key)
+# --- auth: applied to every check request (login | bearer | basic | api_key | oidc)
 # auth:
 #   login: { request: { method: POST, path: /auth/login, body: { username: "${U}", password: "${P}" } }, token_from: "$.accessToken" }
 #   # bearer: { token: "${API_TOKEN}" }
 #   # basic:  { username: "${U}", password: "${P}" }
 #   # api_key: { header: "X-API-Key", value: "${API_KEY}" }
+#   # oidc:   { issuer: "${ISSUER}", client_id: app, client_secret: "${OIDC_SECRET}", scope: "orders:read" }
+#
+# --- users + as: named identities, for role-based access checks
+# users:
+#   admin:  { oidc: { issuer: "${ISSUER}", client_id: admin-cli, client_secret: "${ADMIN_SECRET}" } }
+#   reader: { bearer: { token: "${READER_TOKEN}" } }
+# checks:
+#   - name: "an admin can delete an order"
+#     as: admin
+#     request: { method: DELETE, path: /orders/1 }
+#     expect:  { status: 204 }
+#   - name: "a reader cannot"
+#     as: reader
+#     request: { method: DELETE, path: /orders/2 }
+#     expect:  { status: 403 }
 "#
         }
         "graphql" => {
@@ -913,6 +928,32 @@ fn run_checks_flow(
         report::ok("authenticated (auth applied to check requests)");
     }
 
+    // Named identities (`users:`) are resolved the same way as the default one,
+    // once, before the checks run — so a role's login/OIDC round-trip happens
+    // once rather than per check. A failure here is fatal for the same reason
+    // the default identity's is: every check that runs `as:` that user would
+    // otherwise silently fall back to the wrong credentials.
+    let mut identities = BTreeMap::new();
+    for (name, spec) in &spec.users {
+        match runner::resolve_auth(Some(spec), app_port, &env) {
+            Ok(resolved) => {
+                identities.insert(name.clone(), resolved);
+            }
+            Err(e) => {
+                report::error_line(&format!("auth setup failed for user \"{name}\": {e}"));
+                return 1;
+            }
+        }
+    }
+    if !identities.is_empty() {
+        report::ok(&format!(
+            "resolved {} identit{} ({})",
+            identities.len(),
+            if identities.len() == 1 { "y" } else { "ies" },
+            identities.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
     report::info("");
     report::info(&format!("Running {} check(s)…", selected.len()));
     let external_mocks = mocks
@@ -925,6 +966,7 @@ fn run_checks_flow(
         env,
         auth_headers: auth.headers,
         auth_query: auth.query,
+        identities,
         app_log_path: started_app.as_ref().map(|a| Path::new(&a.log_path).to_path_buf()),
         external_mocks,
         dir: Path::new(dir).to_path_buf(),

@@ -43,10 +43,13 @@ pub struct RunnerContext {
     /// Variables available for `${VAR}` interpolation (from `app.env`; process
     /// env is also consulted as a fallback).
     pub env: BTreeMap<String, String>,
-    /// Headers injected into every check request (from `auth`).
+    /// Headers injected into every check request (from `auth`) — the default
+    /// identity, used by any check that doesn't name one with `as:`.
     pub auth_headers: Vec<(String, String)>,
     /// Query params injected into every check request (from `auth`, e.g. API key).
     pub auth_query: Vec<(String, String)>,
+    /// Named identities from `users:`, resolved once before the checks run.
+    pub identities: BTreeMap<String, ResolvedAuth>,
     /// The app's captured log file, for `logs:` assertions.
     pub app_log_path: Option<std::path::PathBuf>,
     /// Recorded requests per mocked external (name → shared recorder), for
@@ -75,6 +78,7 @@ impl RunnerContext {
             env: BTreeMap::new(),
             auth_headers: Vec::new(),
             auth_query: Vec::new(),
+            identities: BTreeMap::new(),
             app_log_path: None,
             external_mocks: BTreeMap::new(),
             dir: std::path::PathBuf::from("."),
@@ -82,6 +86,16 @@ impl RunnerContext {
             http_capture: std::sync::Mutex::new(None),
             compose_project: None,
             compose_file: None,
+        }
+    }
+
+    /// The identity this check runs as: the `users:` entry named by `as:`, else
+    /// the top-level `auth:`. A name that isn't declared is rejected when the
+    /// spec is parsed, so an unknown one here can only be a test fixture.
+    pub fn auth_for(&self, check: &CheckSpec) -> (&AuthPairs, &AuthPairs) {
+        match check.as_user.as_deref().and_then(|n| self.identities.get(n)) {
+            Some(id) => (&id.headers, &id.query),
+            None => (&self.auth_headers, &self.auth_query),
         }
     }
 }
@@ -190,7 +204,11 @@ fn json_path<'a>(v: &'a Json, path: &str) -> Option<&'a Json> {
     Some(cur)
 }
 
+/// Header/query pairs an identity contributes to a request.
+pub type AuthPairs = [(String, String)];
+
 /// Resolved auth to apply to every check request.
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedAuth {
     pub headers: Vec<(String, String)>,
     pub query: Vec<(String, String)>,
@@ -201,6 +219,118 @@ fn header_scheme(header: &Option<String>, scheme: &Option<String>, token: String
     let s = scheme.clone().unwrap_or_else(|| "Bearer".to_string());
     let value = if s.is_empty() { token } else { format!("{s} {token}") };
     (h, value)
+}
+
+/// Discovery URL for an issuer. Per the spec the document lives at
+/// `<issuer>/.well-known/openid-configuration`, with exactly one slash — an
+/// issuer copy-pasted with a trailing slash is the classic 404 here.
+pub fn discovery_url(issuer: &str) -> String {
+    format!("{}/.well-known/openid-configuration", issuer.trim_end_matches('/'))
+}
+
+/// The token endpoint an `auth.oidc` block resolves to: `token_url` verbatim if
+/// given, otherwise `token_endpoint` from the issuer's discovery document.
+fn oidc_token_endpoint(o: &crate::spec::AuthOidc, env: &BTreeMap<String, String>) -> anyhow::Result<String> {
+    if let Some(u) = &o.token_url {
+        return Ok(interpolate(u, env));
+    }
+    let Some(issuer) = &o.issuer else {
+        anyhow::bail!("auth.oidc needs `issuer` (for discovery) or `token_url`");
+    };
+    let url = discovery_url(&interpolate(issuer, env));
+    let agent = ureq::builder().timeout(Duration::from_secs(15)).build();
+    let body = match agent.get(&url).call() {
+        Ok(r) => r.into_string().unwrap_or_default(),
+        Err(ureq::Error::Status(c, _)) => {
+            anyhow::bail!("auth.oidc discovery {url} returned HTTP {c}")
+        }
+        Err(ureq::Error::Transport(e)) => anyhow::bail!("auth.oidc discovery failed: {e}"),
+    };
+    let doc: Json = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("auth.oidc discovery returned invalid JSON: {e}"))?;
+    doc.get("token_endpoint")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("auth.oidc: no `token_endpoint` in {url}"))
+}
+
+/// The form parameters of the token request (pure — unit tested).
+///
+/// `client_auth: basic` moves the credentials out of the body and into an
+/// `Authorization: Basic` header instead; the caller applies that part.
+fn oidc_form(
+    o: &crate::spec::AuthOidc,
+    env: &BTreeMap<String, String>,
+    basic_auth: bool,
+) -> Vec<(String, String)> {
+    let grant = o.grant.clone().unwrap_or_else(|| "client_credentials".to_string());
+    let mut form = vec![("grant_type".to_string(), grant.clone())];
+    if !basic_auth {
+        form.push(("client_id".to_string(), interpolate(&o.client_id, env)));
+        if let Some(s) = &o.client_secret {
+            form.push(("client_secret".to_string(), interpolate(s, env)));
+        }
+    }
+    if grant == "password" {
+        // The client id is still required in the body for a password grant on
+        // a public client, where there is no secret to authenticate with.
+        if basic_auth {
+            form.push(("client_id".to_string(), interpolate(&o.client_id, env)));
+        }
+        if let Some(u) = &o.username {
+            form.push(("username".to_string(), interpolate(u, env)));
+        }
+        if let Some(pw) = &o.password {
+            form.push(("password".to_string(), interpolate(pw, env)));
+        }
+    }
+    if let Some(s) = &o.scope {
+        form.push(("scope".to_string(), interpolate(s, env)));
+    }
+    if let Some(a) = &o.audience {
+        form.push(("audience".to_string(), interpolate(a, env)));
+    }
+    for (k, v) in &o.params {
+        form.push((k.clone(), interpolate(v, env)));
+    }
+    form
+}
+
+/// Fetch a token for an `auth.oidc` block and return the header to send.
+fn resolve_oidc(
+    o: &crate::spec::AuthOidc,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<(String, String)> {
+    let url = oidc_token_endpoint(o, env)?;
+    let basic_auth = o.client_auth.as_deref() == Some("basic");
+    let form = oidc_form(o, env, basic_auth);
+    let pairs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let agent = ureq::builder().timeout(Duration::from_secs(20)).build();
+    let mut req = agent.post(&url);
+    if basic_auth {
+        let id = interpolate(&o.client_id, env);
+        let secret = o.client_secret.as_ref().map(|s| interpolate(s, env)).unwrap_or_default();
+        let b64 = base64_encode(format!("{id}:{secret}").as_bytes());
+        req = req.set("Authorization", &format!("Basic {b64}"));
+    }
+    let (status, body) = match req.send_form(&pairs) {
+        Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Status(c, r)) => (c, r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Transport(e)) => anyhow::bail!("auth.oidc token request failed: {e}"),
+    };
+    if !(200..300).contains(&status) {
+        // Providers put the reason in the body (`invalid_client`,
+        // `unauthorized_client`, `invalid_scope`), so pass it through.
+        anyhow::bail!("auth.oidc token request to {url} returned HTTP {status}: {}", body.trim());
+    }
+    let parsed: Json = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("auth.oidc: token response was not JSON: {e}"))?;
+    let path = o.token_from.clone().unwrap_or_else(|| "$.access_token".to_string());
+    let token = json_path(&parsed, &path)
+        .map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("auth.oidc: \"{path}\" not found in the token response"))?;
+    Ok(header_scheme(&o.header, &o.scheme, token))
 }
 
 /// Turn the `auth` spec into concrete headers/query params. Runs the login
@@ -240,6 +370,10 @@ pub fn resolve_auth(
                 }
             }
         }
+    }
+
+    if let Some(o) = &auth.oidc {
+        headers.push(resolve_oidc(o, env)?);
     }
 
     if let Some(login) = &auth.login {
@@ -343,13 +477,13 @@ fn truncate_json(v: Json) -> Json {
 
 fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResult>) -> anyhow::Result<()> {
     let Some(req) = &check.request else { return Ok(()) };
+    let (auth_headers, auth_query) = ctx.auth_for(check);
     let path = interpolate(&req.path, &ctx.env);
     let mut url = format!("http://127.0.0.1:{}{}", ctx.app_port, path);
     // Auth query params (e.g. an API key) applied to every request.
-    if !ctx.auth_query.is_empty() {
+    if !auth_query.is_empty() {
         let sep = if url.contains('?') { '&' } else { '?' };
-        let qs = ctx
-            .auth_query
+        let qs = auth_query
             .iter()
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
@@ -360,7 +494,7 @@ fn run_http(check: &CheckSpec, ctx: &RunnerContext, out: &mut Vec<AssertionResul
     // Headers: auth first, then the check's own headers (which override), with
     // ${VAR} interpolation on the check's header values.
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
-    for (k, v) in &ctx.auth_headers {
+    for (k, v) in auth_headers {
         headers.insert(k.clone(), v.clone());
     }
     for (k, v) in &req.headers {
@@ -2144,6 +2278,76 @@ mod tests {
     }
 
     #[test]
+    fn discovery_url_tolerates_a_trailing_slash() {
+        // A copy-pasted issuer with a trailing slash would otherwise 404 on a
+        // double slash — the classic first-time OIDC failure.
+        let want = "https://id.example/realms/app/.well-known/openid-configuration";
+        assert_eq!(discovery_url("https://id.example/realms/app"), want);
+        assert_eq!(discovery_url("https://id.example/realms/app/"), want);
+    }
+
+    #[test]
+    fn client_credentials_form_carries_the_credentials_and_scope() {
+        let o: crate::spec::AuthOidc = serde_yaml::from_str(
+            "client_id: app\nclient_secret: ${S}\nscope: orders:read\naudience: https://api\n",
+        )
+        .unwrap();
+        let env = BTreeMap::from([("S".to_string(), "sh".to_string())]);
+        let form = oidc_form(&o, &env, false);
+        let get = |k: &str| form.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(get("grant_type").as_deref(), Some("client_credentials"));
+        assert_eq!(get("client_id").as_deref(), Some("app"));
+        assert_eq!(get("client_secret").as_deref(), Some("sh"), "${{VAR}} is interpolated");
+        assert_eq!(get("scope").as_deref(), Some("orders:read"));
+        assert_eq!(get("audience").as_deref(), Some("https://api"));
+    }
+
+    #[test]
+    fn basic_client_auth_keeps_the_secret_out_of_the_body() {
+        // Cognito rejects credentials in the body for confidential clients.
+        let o: crate::spec::AuthOidc =
+            serde_yaml::from_str("client_id: app\nclient_secret: sh\nclient_auth: basic\n").unwrap();
+        let form = oidc_form(&o, &BTreeMap::new(), true);
+        assert!(!form.iter().any(|(k, _)| k == "client_secret"), "{form:?}");
+        assert!(!form.iter().any(|(k, _)| k == "client_id"), "{form:?}");
+    }
+
+    #[test]
+    fn password_grant_sends_the_user_and_keeps_the_client_id_even_under_basic() {
+        let o: crate::spec::AuthOidc = serde_yaml::from_str(
+            "client_id: app\ngrant: password\nusername: alice\npassword: pw\n",
+        )
+        .unwrap();
+        let form = oidc_form(&o, &BTreeMap::new(), true);
+        let get = |k: &str| form.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(get("grant_type").as_deref(), Some("password"));
+        assert_eq!(get("username").as_deref(), Some("alice"));
+        assert_eq!(get("password").as_deref(), Some("pw"));
+        assert_eq!(get("client_id").as_deref(), Some("app"), "public client still identifies itself");
+    }
+
+    #[test]
+    fn checks_pick_their_identity_and_fall_back_to_the_default() {
+        let mut ctx = RunnerContext::new(0, vec![]);
+        ctx.auth_headers = vec![("Authorization".into(), "Bearer default".into())];
+        ctx.identities.insert(
+            "admin".into(),
+            ResolvedAuth {
+                headers: vec![("Authorization".into(), "Bearer admin".into())],
+                query: vec![("role".into(), "admin".into())],
+            },
+        );
+        let mut check: CheckSpec =
+            serde_yaml::from_str("name: c\nas: admin\n").unwrap();
+        let (h, q) = ctx.auth_for(&check);
+        assert_eq!(h[0].1, "Bearer admin");
+        assert_eq!(q[0].1, "admin");
+
+        check.as_user = None;
+        assert_eq!(ctx.auth_for(&check).0[0].1, "Bearer default");
+    }
+
+    #[test]
     fn resolve_basic_bearer_apikey_without_app() {
         use crate::spec::{AuthApiKey, AuthBasic, AuthBearer, AuthSpec};
         let env = BTreeMap::new();
@@ -2152,6 +2356,7 @@ mod tests {
             bearer: Some(AuthBearer { token: "T".into(), header: None, scheme: None }),
             api_key: Some(AuthApiKey { header: Some("X-API-Key".into()), query: None, value: "K".into() }),
             login: None,
+            oidc: None,
         };
         let r = resolve_auth(Some(&auth), 0, &env).unwrap();
         assert!(r.headers.iter().any(|(k, v)| k == "Authorization" && v == "Basic dXNlcjpwYXNz"));
