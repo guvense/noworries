@@ -112,11 +112,11 @@ checks:
 
   # websocket — connect, optionally send, await a matching message (ws:// or relative path)
   - name: "subscription pushes update"
-    websocket: { url: "ws://127.0.0.1:${SERVER_PORT}/ws", send: { subscribe: "orders" }, expect_message: { type: "OrderCreated" }, timeout_ms: 5000 }
+    websocket: { url: "/ws", send: { subscribe: "orders" }, expect_message: { type: "OrderCreated" }, timeout_ms: 5000 }
 
   # grpc — via grpcurl on PATH (reflection or protos:[]/import_paths:[])
   - name: "GetOrder returns the order"
-    grpc: { target: "127.0.0.1:${NOWORRIES_GRPC_PORT}", method: "orders.OrderService/GetOrder", data: { id: "ABC" }, expect_contains: { status: "PENDING" } }
+    grpc: { target: "127.0.0.1:${NOWORRIES_APP_PORT}", method: "orders.OrderService/GetOrder", data: { id: "ABC" }, expect_contains: { status: "PENDING" } }
 
   # traces — app exports to Jaeger/Tempo; query its HTTP API for matching spans
   - name: "request produced a trace"
@@ -161,28 +161,34 @@ checks:
   (`FROM app.orders`).
 - **`sse.contains` is an object**, not a string.
 
-## Non-HTTP protocols need a fixed port
+## The app's port is nameable
 
-`request:` and relative paths (`sse.path`, `websocket.url`, `graphql.path`,
-`metrics.path`) resolve against the app's assigned port automatically. A
-`grpc.target` does **not** — there is no `${NOWORRIES_GRPC_PORT}` to
-interpolate, and `${...}` that resolves to nothing fails the check. Serve gRPC
-on a port you choose and hardcode it:
+Relative paths (`sse.path`, `websocket.url`, `graphql.path`, `metrics.path`)
+resolve against the app automatically. For a target you must give in full —
+`grpc.target`, an absolute `ws://` URL — interpolate the port instead of pinning
+one:
+
+| Variable | Value |
+| -------- | ----- |
+| `${NOWORRIES_APP_PORT}` | the port noworries assigned the app |
+| `${NOWORRIES_APP_HOST}` / `${NOWORRIES_APP_URL}` | `127.0.0.1` / `http://127.0.0.1:<port>` |
+| `${PORT}` / `${SERVER_PORT}` | the same port under the framework's own name (`app.port_env` wins) |
+| `${NOWORRIES_<SERVICE>_HOST}` / `_PORT` | a container's mapped host/port (`NOWORRIES_KAFKA_PORT`, …) |
 
 ```yaml
-app:
-  env: { GRPC_PORT: "50551" }
-checks:
-  - name: "GetOrder returns the order"
-    grpc: { target: "127.0.0.1:50551", method: "orders.OrderService/GetOrder", data: { id: "ABC" } }
+grpc: { target: "127.0.0.1:${NOWORRIES_APP_PORT}", method: "orders.OrderService/GetOrder" }
 ```
 
+A gRPC-only service listens on the port noworries handed it, so
+`${NOWORRIES_APP_PORT}` is the target. An app that serves **both** HTTP and gRPC
+needs a second port that noworries doesn't assign — set it yourself
+(`app: { env: { GRPC_PORT: "50551" } }`) and use `${GRPC_PORT}`.
+
 Two more gRPC traps: server **reflection only works with statically compiled
-proto stubs** — if you register services from dynamically built descriptors,
-grpcurl reports "server does not expose service" and you must pass
+proto stubs** — services registered from descriptors built at run time leave
+grpcurl reporting "server does not expose service", so pass
 `protos: [orders.proto]` (resolved relative to the `noworries.yml`); and
-`grpcurl` must be on `PATH` (`brew install grpcurl`), otherwise the check fails
-at run time.
+`grpcurl` must be on `PATH` (`brew install grpcurl`).
 
 ## Secrets and auth in a spec
 

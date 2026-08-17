@@ -114,9 +114,11 @@ isn't shown**:
   the app's *first* `connect()` can still fail. Add a short connect-retry loop
   in the app — it is the most common cause of a "crashed at startup" app in an
   otherwise green run.
-- **Non-HTTP protocols need a fixed port.** Relative paths (`sse`, `websocket`,
-  `graphql`, `metrics`) resolve against the app's assigned port; `grpc.target`
-  can't — serve gRPC on a port you set via `app.env` and hardcode it.
+- **Naming the app's port.** Relative paths (`sse`, `websocket`, `graphql`,
+  `metrics`) resolve against the app automatically; a full target like
+  `grpc.target` interpolates it — `${NOWORRIES_APP_PORT}` (also
+  `${NOWORRIES_APP_URL}`, `${PORT}`/`${SERVER_PORT}`, and
+  `${NOWORRIES_<SERVICE>_PORT}` for containers).
 - **First run is slow:** Elasticsearch (~600MB), Kafka, Mongo and Flink images
   pull on first use — run with `--timeout 600`, otherwise a slow pull shows up as
   `NOT READY` (a timeout, not an app bug).

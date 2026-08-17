@@ -455,7 +455,7 @@ fn template_for(feature: &str) -> Option<&'static str> {
 # checks:
 #   - name: "GetOrder returns the order"
 #     grpc:
-#       target: "127.0.0.1:${NOWORRIES_GRPC_PORT}"
+#       target: "127.0.0.1:${NOWORRIES_APP_PORT}"   # or ${GRPC_PORT} if you serve HTTP + gRPC
 #       method: "orders.OrderService/GetOrder"
 #       data: { id: "ABC" }
 #       expect_contains: { status: "PENDING" }
@@ -492,7 +492,7 @@ fn template_for(feature: &str) -> Option<&'static str> {
 # checks:
 #   - name: "subscription pushes the update"
 #     websocket:
-#       url: "ws://127.0.0.1:${SERVER_PORT}/ws"
+#       url: "/ws"                                  # relative → ws://<app>; or ws://127.0.0.1:${NOWORRIES_APP_PORT}/ws
 #       send: { subscribe: "orders" }
 #       expect_message: { type: "OrderCreated" }
 #       timeout_ms: 5000
@@ -881,6 +881,25 @@ fn run_checks_flow(
     } else {
         0
     };
+
+    // Runtime wiring the *checks* can interpolate. HTTP checks and relative
+    // paths resolve against the app's port automatically, but a target given in
+    // full — `grpc.target`, an absolute `websocket.url`, an external trace
+    // backend URL — had no way to name the app's ephemeral port, so specs had
+    // to pin a fixed port through `app.env`. These make it addressable:
+    // `${NOWORRIES_APP_PORT}`, `${NOWORRIES_APP_URL}`, the framework's own port
+    // var (`${PORT}` / `${SERVER_PORT}`), and `${NOWORRIES_<SERVICE>_PORT}` for
+    // each container. Existing entries win, so `app.env` / `.noworries.env`
+    // still override.
+    let (owned, fallback) = app::check_runtime_vars(
+        app_port,
+        &handles.endpoints,
+        &app::port_env_name(spec.app.as_ref(), framework),
+    );
+    for (k, v) in fallback {
+        env.entry(k).or_insert(v);
+    }
+    env.extend(owned);
 
     // Resolve auth (runs the login request if configured) now that the app is up.
     let auth = match runner::resolve_auth(spec.auth.as_ref(), app_port, &env) {

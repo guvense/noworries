@@ -112,6 +112,48 @@ pub fn pick_free_port() -> Result<u16> {
 /// every resolved service endpoint (falling back to generic vars). `vars` is the
 /// `${VAR}` lookup env (`.noworries.env` + process env) used to interpolate
 /// `app.env` values, so secrets referenced there resolve just like everywhere else.
+/// Variables the **checks** can interpolate, on top of `app.env` /
+/// `.noworries.env`.
+///
+/// HTTP checks and relative paths (`sse.path`, `websocket.url`, `graphql.path`)
+/// resolve against the app's port on their own, but a fully-specified target —
+/// `grpc.target`, an absolute `ws://` URL — cannot: the port is picked at run
+/// time. Without a name for it, such a spec had to pin a fixed port through
+/// `app.env`, which is exactly the workaround this removes.
+///
+/// Returns `(owned, fallback)`: `owned` are noworries' own `NOWORRIES_APP_*`
+/// names and always win; `fallback` (the framework's port var, the per-service
+/// host/port pairs) only fills names the spec hasn't defined itself.
+pub fn check_runtime_vars(
+    app_port: u16,
+    endpoints: &[ServiceEndpoint],
+    port_env: &str,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let mut owned = BTreeMap::new();
+    let mut fallback = framework::generic_env(endpoints);
+    if app_port != 0 {
+        owned.insert("NOWORRIES_APP_HOST".to_string(), "127.0.0.1".to_string());
+        owned.insert("NOWORRIES_APP_PORT".to_string(), app_port.to_string());
+        owned.insert(
+            "NOWORRIES_APP_URL".to_string(),
+            format!("http://127.0.0.1:{app_port}"),
+        );
+        fallback.insert(port_env.to_string(), app_port.to_string());
+    }
+    (owned, fallback)
+}
+
+/// The env var the app reads its port from.
+///
+/// Precedence: explicit `app.port_env` > the framework's convention > generic
+/// default. Node/FastAPI/Go read `PORT`; Spring Boot reads `SERVER_PORT`.
+/// Shared with the runner so a check can interpolate the same name.
+pub fn port_env_name(app: Option<&AppSpec>, fw: Option<&dyn Framework>) -> String {
+    app.and_then(|a| a.port_env.clone())
+        .or_else(|| fw.map(|f| f.default_port_env().to_string()))
+        .unwrap_or_else(|| DEFAULT_PORT_ENV.to_string())
+}
+
 pub fn build_env(
     app: Option<&AppSpec>,
     fw: Option<&dyn Framework>,
@@ -130,13 +172,7 @@ pub fn build_env(
     for (k, v) in extra_env {
         env.insert(k.clone(), v.clone());
     }
-    // Precedence: explicit app.port_env > the framework's convention > generic
-    // default. Node/FastAPI/Go read `PORT`; Spring Boot reads `SERVER_PORT`.
-    let port_env = app
-        .and_then(|a| a.port_env.clone())
-        .or_else(|| fw.map(|f| f.default_port_env().to_string()))
-        .unwrap_or_else(|| DEFAULT_PORT_ENV.to_string());
-    env.insert(port_env, port.to_string());
+    env.insert(port_env_name(app, fw), port.to_string());
     if let Some(a) = app {
         for (k, v) in &a.env {
             // Interpolate ${VAR} so `app.env: { X: "${SECRET}" }` resolves from
@@ -304,7 +340,8 @@ pub fn start_app(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::AppSpec;
+    use crate::lifecycle::ServiceEndpoint;
+    use crate::spec::{AppSpec, ServiceKind};
 
     #[test]
     fn app_env_interpolates_from_vars() {
@@ -318,5 +355,50 @@ mod tests {
         assert_eq!(env.get("API_KEY").map(String::as_str), Some("s3cret"));
         assert_eq!(env.get("PLAIN").map(String::as_str), Some("literal"));
         assert_eq!(env.get("SERVER_PORT").map(String::as_str), Some("8080"));
+    }
+
+    fn ep(kind: ServiceKind, host_port: u16) -> ServiceEndpoint {
+        ServiceEndpoint {
+            service: "svc".into(),
+            kind,
+            host_port,
+            container_port: 5432,
+            aux_ports: Default::default(),
+        }
+    }
+
+    #[test]
+    fn checks_can_name_the_apps_ephemeral_port() {
+        // Without these a `grpc.target` (or any absolute URL) had no way to
+        // reach the app, and the spec had to pin a port via app.env.
+        let (owned, fallback) = check_runtime_vars(54321, &[], "PORT");
+        assert_eq!(owned.get("NOWORRIES_APP_PORT").map(String::as_str), Some("54321"));
+        assert_eq!(owned.get("NOWORRIES_APP_HOST").map(String::as_str), Some("127.0.0.1"));
+        assert_eq!(
+            owned.get("NOWORRIES_APP_URL").map(String::as_str),
+            Some("http://127.0.0.1:54321")
+        );
+        // The framework's own port var is a fallback, so app.env can override it.
+        assert_eq!(fallback.get("PORT").map(String::as_str), Some("54321"));
+    }
+
+    #[test]
+    fn checks_can_name_service_ports_too() {
+        let (_, fallback) = check_runtime_vars(1, &[ep(ServiceKind::Postgres, 5555)], "PORT");
+        assert_eq!(fallback.get("NOWORRIES_POSTGRES_PORT").map(String::as_str), Some("5555"));
+        assert_eq!(fallback.get("NOWORRIES_POSTGRES_HOST").map(String::as_str), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn no_app_means_no_app_vars() {
+        // `app_port == 0` = no app started (a Flink-only run).
+        let (owned, fallback) = check_runtime_vars(0, &[], "PORT");
+        assert!(owned.is_empty());
+        assert!(!fallback.contains_key("PORT"));
+    }
+
+    #[test]
+    fn port_env_name_follows_precedence() {
+        assert_eq!(port_env_name(None, None), "SERVER_PORT");
     }
 }

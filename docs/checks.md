@@ -580,7 +580,7 @@ Connect, optionally send a message, and await a matching message.
 ```yaml
 - name: "subscription pushes the update"
   websocket:
-    url: "ws://127.0.0.1:${SERVER_PORT}/ws"   # or a relative path → ws://app
+    url: "/ws"                               # relative → ws://<app>; absolute ws:// also fine
     send: { subscribe: "orders" }             # optional; JSON or string
     expect_message: { type: "OrderCreated" }  # deep-subset on a received message
     timeout_ms: 5000
@@ -594,7 +594,7 @@ give `protos`/`import_paths`). Keeps noworries free of a heavy gRPC/proto stack.
 ```yaml
 - name: "GetOrder returns the order"
   grpc:
-    target: "127.0.0.1:50551"                    # host:port — see the note below
+    target: "127.0.0.1:${NOWORRIES_APP_PORT}"    # host:port — see the note below
     method: "orders.OrderService/GetOrder"
     data: { id: "ABC" }                          # request JSON
     expect_contains: { status: "PENDING" }       # deep-subset on the response
@@ -605,10 +605,13 @@ give `protos`/`import_paths`). Keeps noworries free of a heavy gRPC/proto stack.
 
 Three things to know:
 
-- **The port is yours to fix.** Relative paths (`sse`, `websocket`, `graphql`,
-  `metrics`) resolve against the app's assigned HTTP port, but `grpc.target` is
-  used verbatim and there is no `${NOWORRIES_GRPC_PORT}` to interpolate. Set the
-  port yourself — `app: { env: { GRPC_PORT: "50551" } }` — and hardcode it.
+- **Name the port, don't pin it.** `grpc.target` is used verbatim, but the
+  app's assigned port is available for interpolation as `${NOWORRIES_APP_PORT}`
+  (also `${NOWORRIES_APP_HOST}`, `${NOWORRIES_APP_URL}`, and the framework's own
+  `${PORT}`/`${SERVER_PORT}`). A gRPC-only service listens on exactly that port.
+  An app serving **both** HTTP and gRPC needs a second port noworries doesn't
+  assign — set it yourself (`app: { env: { GRPC_PORT: "50551" } }`) and use
+  `${GRPC_PORT}`.
 - **Reflection needs statically compiled stubs.** Registering services from
   descriptors you build at run time leaves grpcurl reporting `server does not
   expose service`; pass `protos: [orders.proto]` instead.

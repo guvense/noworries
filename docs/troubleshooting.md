@@ -99,10 +99,12 @@ otherwise green run.
 
 ### A gRPC check can't reach the app
 
-There is no `${NOWORRIES_GRPC_PORT}`: relative paths (`sse`, `websocket`,
-`graphql`, `metrics`) resolve against the app's assigned HTTP port, but
-`grpc.target` is used verbatim. Serve gRPC on a port you set yourself
-(`app.env: { GRPC_PORT: "50551" }`) and hardcode the target. If grpcurl reports
+`grpc.target` is used verbatim — but the app's assigned port has a name:
+`${NOWORRIES_APP_PORT}` (0.12+; also `${NOWORRIES_APP_URL}`, the framework's
+`${PORT}`/`${SERVER_PORT}`, and `${NOWORRIES_<SERVICE>_PORT}` for containers).
+A gRPC-only service listens on that port. If the app serves HTTP *and* gRPC,
+the second port is yours to choose: `app.env: { GRPC_PORT: "50551" }`, then
+`target: "127.0.0.1:${GRPC_PORT}"`. If grpcurl reports
 `server does not expose service`, reflection isn't usable — that happens when
 services are registered from dynamically built descriptors — so pass
 `protos: [orders.proto]` (paths resolve relative to the `noworries.yml`).

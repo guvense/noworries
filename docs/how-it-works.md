@@ -77,6 +77,11 @@ but Go's `go-sql-driver/mysql` wants a DSN (`user:pass@tcp(host:port)/db`) and
 rejects the URL form — build it from `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/
 `MYSQL_PASSWORD`/`MYSQL_DATABASE` rather than parsing `DATABASE_URL`.
 
+The **checks** get the same names for interpolation, plus
+`NOWORRIES_APP_HOST`/`_PORT`/`_URL` for the app itself — so a target that can't
+be relative (`grpc.target`, an absolute `ws://` URL) can say
+`${NOWORRIES_APP_PORT}` instead of pinning a fixed port through `app.env`.
+
 A healthy container is not always a ready protocol: RabbitMQ, MySQL/MariaDB and
 Cassandra accept TCP before they complete an application-level handshake, so the
 app's first `connect()` should sit in a short retry loop.
