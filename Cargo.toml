@@ -1,6 +1,6 @@
 [package]
 name = "noworries"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "Ephemeral infra harness that lets an AI verify the changes it just made — stand up the dependencies a feature needs, exercise them, and report READY/NOT READY."
 license = "MIT"
