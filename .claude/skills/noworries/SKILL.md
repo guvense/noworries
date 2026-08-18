@@ -11,11 +11,13 @@ infrastructure in ephemeral Docker containers, start the app against them, run
 the checks in `noworries.yml`, and read the results. All green → tell the user
 it's **READY**. Otherwise fix the code and run again — loop until green.
 
-> **Requires `noworries` >= 0.6.0** (`noworries --version`). Older builds lack
-> the framework adapters (dotnet/rails/laravel/django), the `mariadb` service,
-> `noworries spec`/`validate`, mock `body_contains`/`delay_ms`, and the
-> extensible check types (graphql/metrics/snapshot/schema/sse/websocket/grpc/
-> traces/security) plus `externals`/`mock`.
+> **Requires `noworries` >= 0.16** for everything described here
+> (`noworries --version`). 0.16 adds `auth.oidc`, named identities (`users:` +
+> `as:`), and the `smtp`/`minio` services with their `email:`/`s3:` checks; 0.14
+> added `${NOWORRIES_APP_PORT}`; 0.12 fixed acting assertions (graphql/grpc)
+> running after the observers. Below 0.6 the framework adapters
+> (dotnet/rails/laravel/django), `noworries spec`/`validate` and the extensible
+> check types are missing entirely.
 
 `noworries` writes `.noworries/results.json` and prints a
 `=== noworries results ===` block ending in `Result: READY` / `NOT READY`.

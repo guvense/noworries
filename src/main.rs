@@ -112,7 +112,7 @@ enum Command {
     Init {
         /// Include ready-to-edit example blocks for specific features
         /// (comma-separated): externals-mock, scenario, flink, auth, graphql,
-        /// grpc, metrics, sse, websocket, schema.
+        /// grpc, metrics, sse, websocket, schema, email, s3.
         #[arg(long, value_delimiter = ',')]
         with: Vec<String>,
     },
@@ -368,6 +368,8 @@ const WITH_FEATURES: &[&str] = &[
     "sse",
     "websocket",
     "schema",
+    "email",
+    "s3",
 ];
 
 /// A commented, ready-to-edit example block appended by `init --with <feature>`.
@@ -449,6 +451,39 @@ fn template_for(feature: &str) -> Option<&'static str> {
 #     as: reader
 #     request: { method: DELETE, path: /orders/2 }
 #     expect:  { status: 403 }
+"#
+        }
+        "email" => {
+            r#"
+# --- email: assert the app sent mail (needs an `smtp` service; Mailpit)
+# services: [smtp]
+# checks:
+#   - name: "ordering emails the customer"
+#     request: { method: POST, path: /orders, body: { sku: "A", email: "user@example.com" } }
+#     expect:  { status: 201 }
+#     email:
+#       to: user@example.com          # matches To, Cc or Bcc
+#       subject_contains: "Order confirmed"
+#       body_contains: "A"            # text or HTML part
+#       expect_count: 1               # omit for "at least one"
+#       # expect_none: true           # assert NO matching mail was sent
+"#
+        }
+        "s3" => {
+            r#"
+# --- s3: assert an upload landed (needs a `minio` service). MinIO starts with
+# --- no buckets: create one in `setup:` or let the app create it.
+# services: [minio]
+# checks:
+#   - name: "the invoice is stored"
+#     request: { method: POST, path: /invoices, body: { order: "A" } }
+#     expect:  { status: 201 }
+#     s3:
+#       bucket: invoices
+#       key: "2026/A.pdf"             # or prefix: "2026/" + expect_count: 3
+#       content_type: application/pdf
+#       min_size: 100                 # catches a zero-byte upload
+#       # endpoint/region/access_key/secret_key -> a real S3 bucket instead
 "#
         }
         "graphql" => {

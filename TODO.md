@@ -32,12 +32,9 @@ use, so treat these as unverified until a docker run says otherwise.
 
 ## Finish what 0.16 started
 
-- [ ] `noworries init --with email,s3` templates (`oidc`/`users` examples went
-      into the `auth` template; these two have none).
-- [ ] Skill's "Requires `noworries` >= 0.6.0" line is stale — `oidc`, `users:`,
-      `email:` and `s3:` need 0.16.
-- [ ] README's service list still stops at `scylladb`; `smtp` and `minio` are
-      missing (docs/ is current).
+- [x] `noworries init --with email,s3` templates.
+- [x] Skill's minimum-version line now names what each release added.
+- [x] README's service list includes `smtp` and `minio`.
 - [ ] MinIO starts with no buckets. Either document harder or give the service
       an optional `buckets: [uploads]` that creates them before the app starts.
 

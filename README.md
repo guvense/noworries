@@ -287,11 +287,14 @@ check types: **[docs/checks.md](docs/checks.md)**.
 **Services it stands up** (declare as `kind` or `kind:tag`):
 `postgres` · `timescaledb` · `cockroachdb` · `mysql` · `mariadb` · `mssql` ·
 `mongodb` · `redis` · `kafka` · `rabbitmq` · `elastic` (7 & 8) · `opensearch` ·
-`clickhouse` · `cassandra` · `scylladb`. Wire-compatible aliases reuse a peer's
+`clickhouse` · `cassandra` · `scylladb` · `smtp` (Mailpit) · `minio` (S3).
+Wire-compatible aliases reuse a peer's
 provider: `timescaledb` and `mariadb` map onto Postgres/MySQL, `scylladb` onto
 Cassandra — same provider/checks, different image. Every service boots with a
 Docker healthcheck and exports connection env to the app (`DATABASE_URL`,
-`RABBITMQ_URL`, `CLICKHOUSE_URL`, `CASSANDRA_CONTACT_POINTS`, …).
+`RABBITMQ_URL`, `CLICKHOUSE_DSN`, `CASSANDRA_CONTACT_POINTS`, `SMTP_HOST`,
+`S3_ENDPOINT` + `AWS_*`, …). Mail and uploads become assertable: `smtp` sinks
+the app's mail for the `email` check, `minio` stores its objects for `s3`.
 
 **Frameworks it auto-detects** (or force with `app.framework`):
 Spring Boot · ASP.NET Core · Go · Ruby on Rails · Laravel · Django · FastAPI
