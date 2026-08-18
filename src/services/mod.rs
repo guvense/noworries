@@ -16,6 +16,8 @@ pub mod kafka;
 pub mod mongodb;
 pub mod mssql;
 pub mod mysql;
+pub mod mailpit;
+pub mod minio;
 pub mod opensearch;
 pub mod postgres;
 pub mod rabbitmq;
@@ -29,6 +31,8 @@ pub use kafka::Kafka;
 pub use mongodb::Mongodb;
 pub use mssql::Mssql;
 pub use mysql::Mysql;
+pub use mailpit::Mailpit;
+pub use minio::Minio;
 pub use opensearch::Opensearch;
 pub use postgres::{postgres_jdbc, Postgres};
 pub use rabbitmq::Rabbitmq;
@@ -109,6 +113,8 @@ pub fn provider_for(kind: ServiceKind) -> Option<Box<dyn ServiceProvider>> {
         ServiceKind::Rabbitmq => Some(Box::new(Rabbitmq)),
         ServiceKind::Clickhouse => Some(Box::new(Clickhouse)),
         ServiceKind::Cassandra => Some(Box::new(Cassandra)),
+        ServiceKind::Smtp => Some(Box::new(Mailpit)),
+        ServiceKind::Minio => Some(Box::new(Minio)),
     }
 }
 
@@ -143,6 +149,8 @@ mod tests {
             (ServiceKind::Rabbitmq, 5672),
             (ServiceKind::Clickhouse, 8123),
             (ServiceKind::Cassandra, 9042),
+            (ServiceKind::Smtp, 1025),
+            (ServiceKind::Minio, 9000),
         ];
         for (kind, port) in cases {
             let provider = provider_for(kind).expect("provider exists");

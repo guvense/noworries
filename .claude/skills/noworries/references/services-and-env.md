@@ -7,7 +7,7 @@ _Reference for the `noworries` skill. Read this when choosing `services:` or whe
 `postgres` · `timescaledb` · `cockroachdb` · `mysql` · `mariadb` · `mssql`
 (`sqlserver`) · `mongodb` (`mongo`) · `redis` · `kafka` · `rabbitmq` (`amqp`) ·
 `elastic` (`elasticsearch`) · `opensearch` · `clickhouse` · `cassandra` ·
-`scylladb`. Declare as `kind` or `kind:tag`:
+`scylladb` · `smtp` (`mailpit`/`mailhog`) · `minio` (`s3`). Declare as `kind` or `kind:tag`:
 
 ```yaml
 services: [ postgres:16-alpine, mysql, mongodb, redis, kafka, elastic ]
@@ -143,6 +143,8 @@ strings — read whichever your client expects):
 | mssql     | `DATABASE_URL` (sqlserver://), `MSSQL_HOST`/`MSSQL_PORT`/`MSSQL_USER`/`MSSQL_PASSWORD` (= `MSSQL_SA_PASSWORD`)/`MSSQL_DATABASE` (`master`), `MSSQL_JDBC_URL` |
 | clickhouse | `CLICKHOUSE_DSN` (**use this** — credentials + `?database=noworries`), `CLICKHOUSE_URL` (bare), `CLICKHOUSE_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_DATABASE` |
 | rabbitmq  | `RABBITMQ_URL`, `AMQP_URL` (both carry `noworries:noworries@`) |
+| smtp | `SMTP_HOST`/`SMTP_PORT`/`SMTP_URL`, `MAIL_HOST`/`MAIL_PORT`/`MAIL_MAILER`, `EMAIL_HOST`/`EMAIL_PORT` (Spring also gets `SPRING_MAIL_HOST`/`_PORT`). Accepts any credentials; nothing is delivered — the `email:` check reads the mailbox back |
+| minio | `S3_ENDPOINT`, `AWS_ENDPOINT_URL`(`_S3`), `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (`noworries`/`noworries`), `AWS_REGION` (`us-east-1`), `AWS_S3_FORCE_PATH_STYLE=true` — **path-style is mandatory**, a virtual-host URL doesn't resolve against MinIO. Create the bucket in `setup:` or from the app |
 | cassandra | `CASSANDRA_CONTACT_POINTS` (host only, comma-separated for a cluster; single node here), `CASSANDRA_HOST`, `CASSANDRA_PORT` |
 
 **Laravel** gets the conventional vars above **plus** its native discrete keys:

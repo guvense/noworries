@@ -61,6 +61,8 @@ pub fn in_network_coords(kind: ServiceKind) -> (&'static str, u16) {
         ServiceKind::Rabbitmq => ("rabbitmq", 5672),
         ServiceKind::Clickhouse => ("clickhouse", 8123),
         ServiceKind::Cassandra => ("cassandra", 9042),
+        ServiceKind::Smtp => ("smtp", 1025),
+        ServiceKind::Minio => ("minio", 9000),
     }
 }
 

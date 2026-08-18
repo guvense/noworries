@@ -137,7 +137,14 @@ impl Framework for SpringBoot {
                 // ClickHouse and OpenSearch have no ubiquitous Spring Boot
                 // auto-config keys; the framework-agnostic NOWORRIES_* vars from
                 // generic_env cover them.
-                ServiceKind::Clickhouse | ServiceKind::Opensearch => {}
+                ServiceKind::Smtp => {
+                    m.insert("SPRING_MAIL_HOST".to_string(), "127.0.0.1".to_string());
+                    m.insert("SPRING_MAIL_PORT".to_string(), ep.host_port.to_string());
+                }
+                // ClickHouse, OpenSearch and MinIO have no ubiquitous Spring
+                // Boot auto-config keys; the conventional vars (CLICKHOUSE_DSN,
+                // OPENSEARCH_URL, S3_ENDPOINT + AWS_*) cover them.
+                ServiceKind::Clickhouse | ServiceKind::Opensearch | ServiceKind::Minio => {}
             }
         }
         m

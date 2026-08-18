@@ -617,6 +617,59 @@ Three things to know:
   expose service`; pass `protos: [orders.proto]` instead.
 - **`protos`/`import_paths` resolve relative to the `noworries.yml`.**
 
+### Email (`email`)
+
+Declare an `smtp` service and the app's mail goes into an ephemeral Mailpit
+container instead of anyone's inbox; the check reads that mailbox back.
+
+```yaml
+- name: "ordering emails the customer"
+  request: { method: POST, path: /orders, body: { sku: "NET-1", email: "user@example.com" } }
+  expect:  { status: 201 }
+  email:
+    to: user@example.com          # matches To, Cc or Bcc (case-insensitive)
+    from: no-reply@shop.io        # optional
+    subject_contains: "Order confirmed"
+    body_contains: "NET-1"        # searches the text and HTML parts
+    expect_count: 1               # exact; omit for "at least one"
+    # expect_none: true           # assert nothing matched (e.g. no mail on failure)
+    timeout_ms: 8000
+```
+
+Filters combine with AND, and the check retries within its budget — mail is
+usually queued and sent off the request path. The app needs no configuration
+beyond reading the injected `SMTP_HOST`/`SMTP_PORT` (or `MAIL_*`, `EMAIL_*`,
+`SPRING_MAIL_*`); the sink accepts any credentials.
+
+### Object storage (`s3`)
+
+Declare a `minio` service and an upload becomes observable. Requests are
+SigV4-signed, so the same check works against real S3 by overriding the
+endpoint and credentials.
+
+```yaml
+- name: "the invoice is stored"
+  request: { method: POST, path: /invoices, body: { order: "NET-1" } }
+  expect:  { status: 201 }
+  s3:
+    bucket: invoices
+    key: "2026/NET-1.pdf"         # one object; or prefix: "2026/" to count
+    # expect_exists: false        # assert it is NOT there
+    content_type: application/pdf
+    min_size: 100                 # catches a zero-byte upload
+    body_contains: "INVOICE"      # text objects
+    timeout_ms: 8000
+    # endpoint: "https://s3.eu-west-1.amazonaws.com"
+    # region: eu-west-1
+    # access_key: "${AWS_KEY}"
+    # secret_key: "${AWS_SECRET}"
+```
+
+MinIO starts with **no buckets** — create one in `setup:` or let the app create
+it on first write. Addressing is path-style (`http://host:9000/bucket/key`);
+the injected `AWS_S3_FORCE_PATH_STYLE=true` tells SDKs the same, because a
+virtual-host URL doesn't resolve against MinIO.
+
 ### OpenTelemetry traces (`traces`)
 
 The app exports spans to a trace backend (Jaeger/Tempo); noworries queries the

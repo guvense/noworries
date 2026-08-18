@@ -58,6 +58,14 @@ Required, non-empty list. Each entry is `kind` or `kind:tag`. Supported kinds:
 | `clickhouse`        | `clickhouse/clickhouse-server:24.8` |
 | `cassandra`         | `cassandra:5.0`           |
 | `scylla` / `scylladb` | `scylladb/scylla:6.1`   |
+| `smtp` / `mailpit` / `mailhog` | `axllent/mailpit:latest` |
+| `minio` / `s3`      | `minio/minio:latest`      |
+
+`smtp` stands up a mail sink (Mailpit): the app sends over SMTP and the
+[`email`](checks.md#email-email) check reads the mailbox back over its JSON API,
+so nothing leaves the machine. `minio` stands up S3-compatible storage for the
+[`s3`](checks.md#object-storage-s3) check — it starts with no buckets, so create
+one in `setup:` or let the app create it on first write.
 
 Note that `kafka:<tag>` expands to the **`apache/kafka`** repository (Kafka's
 official image) and `elastic`/`elasticsearch` expand to the official

@@ -1,6 +1,6 @@
 [package]
 name = "noworries"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 description = "Ephemeral infra harness that lets an AI verify the changes it just made — stand up the dependencies a feature needs, exercise them, and report READY/NOT READY."
 license = "MIT"
@@ -35,6 +35,11 @@ tiny_http = "0.12"
 # WebSocket client for `websocket` stream assertions. No TLS backend (ws://
 # localhost only) → no openssl; pure Rust, cross-platform.
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# AWS SigV4 for the `s3` check — pure Rust, no TLS stack. Signing here (rather
+# than shelling out to `mc`/`aws`) keeps the check dependency-free and makes it
+# work against real S3 as well as the MinIO container.
+sha2 = "0.10"
+hmac = "0.12"
 
 # Unix-only: process-group signalling for guaranteed teardown. On Windows the
 # equivalent is `taskkill /T /F` (see src/app.rs::kill_tree), so no libc there.

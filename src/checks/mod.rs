@@ -17,10 +17,13 @@ use crate::runner::{interpolate, AssertionResult, RunnerContext};
 use crate::spec::CheckSpec;
 
 pub mod cassandra;
+pub mod email;
 pub mod clickhouse;
 pub mod graphql;
 pub mod rabbitmq;
+pub mod s3;
 pub mod security;
+pub mod sigv4;
 pub mod grpc;
 pub mod metrics;
 pub mod schema;
@@ -68,6 +71,8 @@ pub fn registry() -> Vec<Box<dyn Assertion>> {
         Box::new(clickhouse::Clickhouse),
         Box::new(rabbitmq::Rabbitmq),
         Box::new(cassandra::Cassandra),
+        Box::new(email::Email),
+        Box::new(s3::S3),
         Box::new(security::Security),
         Box::new(sse::Sse),
         Box::new(websocket::WebSocket),
@@ -125,6 +130,8 @@ pub(crate) fn observes_elsewhere(check: &CheckSpec) -> bool {
         || check.logs.is_some()
         || !check.external_calls.is_empty()
         || check.sse.is_some()
+        || check.email.is_some()
+        || check.s3.is_some()
         || check
             .kafka
             .as_ref()

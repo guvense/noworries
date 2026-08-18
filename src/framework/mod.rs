@@ -218,6 +218,38 @@ pub fn conventional_env(endpoints: &[ServiceEndpoint]) -> BTreeMap<String, Strin
                 m.insert("CLICKHOUSE_PASSWORD".to_string(), CLICKHOUSE_PASSWORD.to_string());
                 m.insert("CLICKHOUSE_DATABASE".to_string(), CLICKHOUSE_DB.to_string());
             }
+            ServiceKind::Smtp => {
+                // The names every mail library reaches for; the sink accepts
+                // any credentials, so none are needed.
+                m.insert("SMTP_HOST".to_string(), host.to_string());
+                m.insert("SMTP_PORT".to_string(), p.to_string());
+                m.insert("SMTP_URL".to_string(), format!("smtp://{host}:{p}"));
+                m.insert("MAIL_HOST".to_string(), host.to_string());
+                m.insert("MAIL_PORT".to_string(), p.to_string());
+                m.insert("MAIL_MAILER".to_string(), "smtp".to_string());
+                m.insert("EMAIL_HOST".to_string(), host.to_string());
+                m.insert("EMAIL_PORT".to_string(), p.to_string());
+            }
+            ServiceKind::Minio => {
+                let url = format!("http://{host}:{p}");
+                m.insert("S3_ENDPOINT".to_string(), url.clone());
+                m.insert("AWS_ENDPOINT_URL".to_string(), url.clone());
+                m.insert("AWS_ENDPOINT_URL_S3".to_string(), url.clone());
+                m.insert("MINIO_ENDPOINT".to_string(), url);
+                m.insert("AWS_ACCESS_KEY_ID".to_string(), crate::services::minio::MINIO_USER.to_string());
+                m.insert(
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    crate::services::minio::MINIO_PASSWORD.to_string(),
+                );
+                m.insert("AWS_REGION".to_string(), crate::services::minio::MINIO_REGION.to_string());
+                m.insert(
+                    "AWS_DEFAULT_REGION".to_string(),
+                    crate::services::minio::MINIO_REGION.to_string(),
+                );
+                // Path-style is mandatory against MinIO: a virtual-host URL
+                // (`http://bucket.127.0.0.1:9000`) doesn't resolve.
+                m.insert("AWS_S3_FORCE_PATH_STYLE".to_string(), "true".to_string());
+            }
             ServiceKind::Cassandra => {
                 m.insert("CASSANDRA_CONTACT_POINTS".to_string(), host.to_string());
                 m.insert("CASSANDRA_HOST".to_string(), host.to_string());

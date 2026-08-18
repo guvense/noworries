@@ -29,3 +29,7 @@ _Reference for the `noworries` skill. Read this when a run fails for a reason th
 | `auth.oidc discovery ... returned HTTP 404` | the issuer is wrong — discovery is `<issuer>/.well-known/openid-configuration` (Keycloak: `https://host/realms/<realm>`). Or skip it with `token_url:` |
 | `auth.oidc token request ... invalid_client` | wrong `client_id`/`client_secret`, or the provider wants the secret in a header — set `client_auth: basic` (Cognito) |
 | `runs as "x", which is not declared under "users"` | typo in a check's `as:`; the message lists the declared identities |
+| `email assertion but no smtp service is running` | add `smtp` to `services:` (Mailpit — SMTP on the wired port, JSON API alongside) |
+| The app sent mail but the `email:` check finds nothing | check the app really used `SMTP_HOST`/`SMTP_PORT` (not a hardcoded localhost:25), and that the send isn't queued past the check's `timeout_ms` |
+| `s3` check gets `NoSuchBucket` | MinIO starts empty — create the bucket in `setup:` or let the app create it on first write |
+| `s3` check gets 403 / SignatureDoesNotMatch | the endpoint's region differs from `region:` (MinIO here is `us-east-1`), or the credentials were overridden — they default to `noworries`/`noworries` |

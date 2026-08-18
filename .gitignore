@@ -8,3 +8,4 @@
 # local session cruft (not part of the repo)
 _to_delete/
 _archive/
+.git-locks/

@@ -102,7 +102,11 @@ impl Framework for Laravel {
                 | ServiceKind::Opensearch
                 | ServiceKind::Rabbitmq
                 | ServiceKind::Clickhouse
-                | ServiceKind::Cassandra => {}
+                | ServiceKind::Cassandra
+                // MAIL_* and the AWS S3 vars come from conventional_env, and
+                // Laravel reads exactly those names already.
+                | ServiceKind::Smtp
+                | ServiceKind::Minio => {}
             }
         }
         m

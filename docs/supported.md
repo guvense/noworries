@@ -70,6 +70,8 @@ uses the default image; `kind:tag` pins a tag.
 | `clickhouse` | `clickhouse/clickhouse-server:24.8` | HTTP interface (8123) for the `clickhouse` check |
 | `cassandra` | `cassandra:5.0` | CQL via in-container `cqlsh` |
 | `scylla` / `scylladb` | `scylladb/scylla:6.1` | CQL-wire — reuses the Cassandra provider/checks |
+| `smtp` / `mailpit` / `mailhog` | `axllent/mailpit:latest` | SMTP sink; JSON API alongside for the `email` check. Mailpit rather than MailHog: MailHog has had no release since 2020 and no arm64 image |
+| `minio` / `s3` | `minio/minio:latest` | S3 API (9000) for the `s3` check; `noworries`/`noworries`, region `us-east-1`, path-style addressing |
 
 Plus **Apache Flink** (`flink:1.19` by default) — declared in its own `flink:`
 block (an ephemeral jobmanager + taskmanager session cluster) instead of

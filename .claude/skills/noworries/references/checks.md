@@ -75,6 +75,8 @@ Field summary: **http** `request{method,path,headers,body}` + `expect{status,bod
 **rabbitmq** `queue`, `vhost`, `expect_exists`, `min_messages`, `expect_messages` (queue depth via management API) ·
 **clickhouse** `query`, `expect_value`, `expect_row`, `expect_rows` (HTTP SQL; the check queries the `noworries` database — make sure the app wrote there, see `services-and-env.md`. No `FORMAT` clause needed) ·
 **cassandra** `query`, `expect_value`, `expect_row`, `expect_rows` (CQL via cqlsh; also Scylla). **No `keyspace` field** — qualify tables in the query: `SELECT ... FROM app.orders` ·
+**email** `to` (matches To/Cc/Bcc), `from`, `subject_contains`, `body_contains` (text or HTML part), `expect_count`, `expect_none`, `timeout_ms` — reads the ephemeral `smtp` sink's mailbox; retry-aware, since mail is usually queued ·
+**s3** `bucket` + `key` (one object) or `prefix` (a listing), `expect_exists`, `expect_count`, `content_type`, `min_size`, `body_contains`, plus `endpoint`/`region`/`access_key`/`secret_key` to point at a real bucket instead of the `minio` service ·
 **security** `path`, `method`, `body`, `require_auth`, `reject_bad_input`, `no_error_leak`, `require_headers[]` (defensive abuse-case probes of the app under test) ·
 **graphql** `path`, `query`, `variables`, `expect_data`, `expect_no_errors` ·
 **metrics** `path`, `metric`, `labels`, `expect` (Prometheus). `expect` is a comparison string: `">= 1"`, `"> 0"`, `"<= 10"`, `"< 5"`, `"== 5"` (also `"= 5"`); a bare number means `== n` ·
@@ -139,6 +141,26 @@ checks:
   # cassandra — run CQL via cqlsh (also Scylla)
   - name: "order written to the wide-column store"
     cassandra: { query: "SELECT count(*) FROM app.orders WHERE id = 42", expect_value: 1 }
+
+  # email — the app sent mail (needs an `smtp` service; Mailpit under the hood)
+  - name: "ordering emails the customer"
+    request: { method: POST, path: /orders, body: { sku: "NET-1", email: "user@example.com" } }
+    expect:  { status: 201 }
+    email:
+      to: user@example.com
+      subject_contains: "Order confirmed"
+      body_contains: "NET-1"
+      expect_count: 1
+
+  # s3 — the upload actually landed (needs a `minio` service)
+  - name: "the invoice is stored"
+    request: { method: POST, path: /invoices, body: { order: "NET-1" } }
+    expect:  { status: 201 }
+    s3:
+      bucket: invoices
+      key: "2026/NET-1.pdf"
+      content_type: application/pdf
+      min_size: 100
 
   # security — defensive abuse-case probes of the app under test (localhost only)
   - name: "orders endpoint is hardened"

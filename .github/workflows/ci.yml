@@ -38,12 +38,12 @@ jobs:
           cargo test --lib
           # in-process tests (no Docker): mock server, graphql/metrics/sse/ws/snapshot,
           # OTel traces (fake Jaeger), gRPC (fake grpcurl; unix-only, no-op on Windows)
-          cargo test --test mock_it --test checks_it --test traces_it --test grpc_it
+          cargo test --test mock_it --test checks_it --test traces_it --test grpc_it --test mail_s3_it
 
       - name: Start real infrastructure
         run: docker compose -f ci/docker-compose.yml up -d --wait
 
-      - name: Integration tests (real Kafka / Elasticsearch / MySQL / MongoDB / Postgres / ClickHouse / RabbitMQ)
+      - name: Integration tests (real Kafka / Elasticsearch / MySQL / MongoDB / Postgres / ClickHouse / RabbitMQ / Mailpit / MinIO)
         env:
           NOWORRIES_IT_KAFKA_PORT: "9092"
           NOWORRIES_IT_ES_PORT: "9200"
@@ -53,7 +53,10 @@ jobs:
           NOWORRIES_IT_CLICKHOUSE_PORT: "8123"
           NOWORRIES_IT_RABBITMQ_PORT: "5672"
           NOWORRIES_IT_RABBITMQ_MGMT_PORT: "15672"
-        run: cargo test --test kafka_it --test elastic_it --test mysql_it --test mongo_it --test scenario_it --test schema_it --test clickhouse_it --test rabbitmq_it -- --nocapture
+          NOWORRIES_IT_SMTP_PORT: "1025"
+          NOWORRIES_IT_SMTP_API: "8025"
+          NOWORRIES_IT_MINIO_PORT: "9000"
+        run: cargo test --test kafka_it --test elastic_it --test mysql_it --test mongo_it --test scenario_it --test schema_it --test clickhouse_it --test rabbitmq_it --test mail_s3_real_it -- --nocapture
 
       # Copy the Flink image's built-in streaming example so the flink_it test can
       # submit a real job (upload -> run -> poll RUNNING) without building one.
@@ -143,4 +146,4 @@ jobs:
           cargo test --lib
           # in-process tests (no Docker): mock server, graphql/metrics/sse/ws/snapshot,
           # OTel traces (fake Jaeger), gRPC (fake grpcurl; unix-only, no-op on Windows)
-          cargo test --test mock_it --test checks_it --test traces_it --test grpc_it
+          cargo test --test mock_it --test checks_it --test traces_it --test grpc_it --test mail_s3_it

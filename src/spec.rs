@@ -37,6 +37,10 @@ pub enum ServiceKind {
     Rabbitmq,
     Clickhouse,
     Cassandra,
+    /// SMTP sink for mail assertions (Mailpit: SMTP in, HTTP API out).
+    Smtp,
+    /// S3-compatible object storage (MinIO).
+    Minio,
 }
 
 impl ServiceKind {
@@ -54,6 +58,8 @@ impl ServiceKind {
             ServiceKind::Rabbitmq => "rabbitmq",
             ServiceKind::Clickhouse => "clickhouse",
             ServiceKind::Cassandra => "cassandra",
+            ServiceKind::Smtp => "smtp",
+            ServiceKind::Minio => "minio",
         }
     }
 
@@ -80,6 +86,12 @@ impl ServiceKind {
             // ScyllaDB is CQL-wire-compatible with Cassandra, so it reuses the
             // Cassandra provider with the `scylladb/scylla` image.
             "cassandra" | "scylla" | "scylladb" => Some(ServiceKind::Cassandra),
+            // Mailpit rather than MailHog: MailHog has had no release since
+            // 2020 and ships no arm64 image, so it runs under emulation on
+            // Apple Silicon. Mailpit speaks the same SMTP-sink role and its
+            // JSON API is what the `email:` check reads.
+            "smtp" | "mailpit" | "mailhog" | "mail" => Some(ServiceKind::Smtp),
+            "minio" | "s3" => Some(ServiceKind::Minio),
             _ => None,
         }
     }
@@ -110,6 +122,8 @@ pub fn default_repo(kind: ServiceKind) -> &'static str {
         ServiceKind::Rabbitmq => "rabbitmq",
         ServiceKind::Clickhouse => "clickhouse/clickhouse-server",
         ServiceKind::Cassandra => "cassandra",
+        ServiceKind::Smtp => "axllent/mailpit",
+        ServiceKind::Minio => "minio/minio",
     }
 }
 
@@ -128,6 +142,8 @@ pub fn default_image(kind: ServiceKind) -> &'static str {
         ServiceKind::Rabbitmq => "rabbitmq:3.13-management",
         ServiceKind::Clickhouse => "clickhouse/clickhouse-server:24.8",
         ServiceKind::Cassandra => "cassandra:5.0",
+        ServiceKind::Smtp => "axllent/mailpit:latest",
+        ServiceKind::Minio => "minio/minio:latest",
     }
 }
 
@@ -140,7 +156,7 @@ fn parse_service_decl(raw: &str) -> Result<ServiceDecl> {
     let kind_token = parts.next().unwrap_or("");
     let kind = ServiceKind::from_token(kind_token).ok_or_else(|| {
         anyhow!(
-            "unsupported service \"{value}\". supported: postgres, timescaledb, cockroachdb, mysql, mariadb, mssql, mongodb, redis, kafka, rabbitmq, elasticsearch, opensearch, clickhouse, cassandra, scylladb"
+            "unsupported service \"{value}\". supported: postgres, timescaledb, cockroachdb, mysql, mariadb, mssql, mongodb, redis, kafka, rabbitmq, elasticsearch, opensearch, clickhouse, cassandra, scylladb, smtp (mailpit), minio (s3)"
         )
     })?;
     let tag = parts.next().map(|s| s.to_string());
@@ -845,6 +861,79 @@ pub struct CheckSpec {
     pub cassandra: Option<CassandraAssertion>,
     #[serde(default)]
     pub security: Option<SecurityAssertion>,
+    #[serde(default)]
+    pub email: Option<EmailAssertion>,
+    #[serde(default)]
+    pub s3: Option<S3Assertion>,
+}
+
+/// Mail assertion: read the ephemeral SMTP sink's mailbox (needs an `smtp`
+/// service). Filters combine with AND; the check retries, because mail is
+/// usually queued and sent off the request path.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmailAssertion {
+    /// Recipient address — matches To, Cc or Bcc, case-insensitively.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Sender address (case-insensitive).
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Substring of the subject (case-sensitive).
+    #[serde(default)]
+    pub subject_contains: Option<String>,
+    /// Substring of the body — text or HTML part.
+    #[serde(default)]
+    pub body_contains: Option<String>,
+    /// Exact number of matching messages; omit for "at least one".
+    #[serde(default)]
+    pub expect_count: Option<u64>,
+    /// Assert that *nothing* matched — e.g. no mail on a failed payment.
+    #[serde(default)]
+    pub expect_none: Option<bool>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Object-storage assertion over the S3 API. Defaults target the ephemeral
+/// `minio` service; set `endpoint`/`region`/credentials to point at a real
+/// bucket instead.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct S3Assertion {
+    pub bucket: String,
+    /// A single object's key. Either this or `prefix`.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// List mode: count the objects under this prefix.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Assert the object exists (default true). `false` asserts it does not.
+    #[serde(default)]
+    pub expect_exists: Option<bool>,
+    /// Exact number of objects under `prefix`.
+    #[serde(default)]
+    pub expect_count: Option<u64>,
+    /// Expected media type (compared without any `; charset=...`).
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Minimum object size in bytes — catches a zero-byte upload.
+    #[serde(default)]
+    pub min_size: Option<u64>,
+    /// Substring the object's body must contain (text objects).
+    #[serde(default)]
+    pub body_contains: Option<String>,
+    /// Endpoint override, e.g. `https://s3.eu-west-1.amazonaws.com`.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub access_key: Option<String>,
+    #[serde(default)]
+    pub secret_key: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 fn default_true() -> bool {
